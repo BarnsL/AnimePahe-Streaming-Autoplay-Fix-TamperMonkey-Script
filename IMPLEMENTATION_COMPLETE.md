@@ -1,3 +1,97 @@
+# v2.0.5 Update - Auto Server Selection & Improved Background Protection ✅
+
+## New in v2.0.5
+
+### Issue #1: Auto-Play Not Working
+**Problem**: When clicking a series from homepage, user was routed to episode 1 BUT the video didn't auto-play because no video server was selected (dropdown was still showing "Select Video Server").
+
+**Fix**: Added `autoSelectVideoServerForAutoplay()` function that:
+- Polls for video server dropdown when autoplay intent is detected
+- Automatically selects the first available server
+- Triggers change event to load the kwik iframe
+- Result: Video loads immediately and auto-plays with sound muted
+
+### Issue #2: Pause Button Still Showing
+**Problem**: Even with v2.0.4's RAF loop, pause button still showing when tabbed away in some cases.
+
+**Fixes**:
+1. **Reduced throttle from 300ms to 150ms** - Faster pause recovery (2x more responsive)
+2. **Start RAF loop earlier** - Now starts on `loadedmetadata` event, not just on play
+3. **Enhanced background detection** - Added check for `document.activeElement` state
+4. **More aggressive monitoring** - Better handling of multiple pause events
+
+## Implementation Details - v2.0.5
+
+### New Function: `autoSelectVideoServerForAutoplay()`
+```javascript
+// Polls for video server dropdown and auto-selects first option
+// Runs every 600ms for up to 20 attempts when autoplay intent active
+// Triggers change event to load video player
+```
+
+**Called at**:
+- Initial page load (after episode bootstrap)
+- On every episode change
+- Delayed ~1.5 seconds as fallback
+
+### Enhanced Background Loop
+
+**Throttle Reduction**: `300ms → 150ms`
+- v2.0.4 checked resume every 300ms
+- v2.0.5 checks every 150ms (faster recovery)
+- Browser pauses immediately, we now resume within 150ms
+- Pause button has less time to appear
+
+**Earlier Loop Start**: `loadedmetadata event`
+- v2.0.4 started loop on play event
+- v2.0.5 starts when metadata loads (earlier detection)
+- If page loads in background, loop protects from first frame
+
+**Better Detection**:
+```javascript
+// Enhanced isInBackgroundContext() now checks:
+1. document.hidden === true
+2. document.visibilityState === 'hidden'
+3. document.hasFocus() === false
+4. document.activeElement state (new!)
+```
+
+## Testing the New Features
+
+### Test 1: Auto-Play After Homepage Click
+1. Go to https://animepahe.ch/
+2. Click on a series card (e.g., Needy Girl Overdose)
+3. Should navigate to episode 1
+4. Video should load automatically 
+5. Audio should unmute after ~5 seconds
+6. Check console for: `[AnimePahe AutoNext Background] BRIDGE_ATTACHED`
+
+### Test 2: Faster Background Recovery
+1. Start playing an episode
+2. Open DevTools (F12) → Console  
+3. Tab away / Minimize browser
+4. Watch console - should see frequent `RAFLoop_RESUME` messages (every 150ms now)
+5. Tab back - video still playing, pause button gone
+
+### Test 3: Discord Streaming
+1. Start sharing anime episode to Discord
+2. Tab away from browser
+3. Video keeps playing in Discord view
+4. Chat stays updated while anime plays in background
+
+## Version Comparison
+
+| Feature | v2.0.4 | v2.0.5 |
+|---------|--------|--------|
+| Auto video server selection | ❌ | ✅ NEW |
+| RAF background loop | ✅ | ✅ (improved) |
+| Resume throttle | 300ms | 150ms (2x faster) ✅ |
+| Loop start timing | On play | On metadata ✅ |
+| Background detection | 3 checks | 4 checks ✅ |
+| Console logging | ✅ | ✅ (same) |
+
+---
+
 # v2.0.4 Implementation Complete ✅
 
 ## Summary of Work Completed
@@ -177,15 +271,16 @@ See **BACKGROUND_PLAYBACK_DEBUG.md** for:
 
 ### Version Information
 
-- **Current Version**: 2.0.4
-- **Commit**: 366fdea
+- **Current Version**: 2.0.5
+- **Commit**: 03d9a9c
 - **Date**: 2026-05-11
 - **Author**: mikutellyourworld
 
 ### Git History
 
 ```
-366fdea (HEAD -> main, origin/main, origin/HEAD) v2.0.4: Major background keep-alive overhaul with requestAnimationFrame
+03d9a9c (HEAD -> main, origin/main, origin/HEAD) v2.0.5: Add auto video server selection + more aggressive background playback protection
+366fdea v2.0.4: Major background keep-alive overhaul with requestAnimationFrame
 bba58d9 v2.0.3: Enhance background video keep-alive for Discord streaming
 03337de Reinitialize repository history under mikutellyourworld
 ```
