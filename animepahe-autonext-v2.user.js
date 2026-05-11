@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.3
+// @version      2.0.4
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -969,6 +969,13 @@
         timer = setInterval(attemptUnmute, 250);
       };
 
+      // Detailed logging for background keep-alive debugging
+      const logBackgroundEvent = function (event, details) {
+        if (true) { // Set to false to disable verbose logging
+          console.log('[AnimePahe AutoNext Background] ' + event + ' | ' + JSON.stringify(details));
+        }
+      };
+
       // Detects if browser/tab is in background or not focused for Discord streaming scenarios.
       const isInBackgroundContext = function () {
         if (typeof document.hidden === 'boolean' && document.hidden) {
@@ -1025,40 +1032,71 @@
         }
       };
 
-      // Periodic keep-alive loop: prevents native pause during Discord streaming.
-      // Runs every 2 seconds while in background to maintain active playback state.
-      let backgroundPlaybackLoopTimer = null;
-      const startBackgroundPlaybackLoop = function () {
-        if (backgroundPlaybackLoopTimer !== null) {
+      // Continuous keep-alive using requestAnimationFrame: prevents pause during Discord streaming.
+      // Monitors video state every animation frame (~60fps) while in background.
+      let backgroundPlaybackLoopActive = false;
+      let backgroundPlaybackRafId = null;
+      let lastBackgroundResumeAttempt = 0;
+      const BACKGROUND_RESUME_THROTTLE_MS = 300; // Prevent resume spam
+
+      const backgroundPlaybackRafLoop = function () {
+        if (!backgroundPlaybackLoopActive) {
           return;
         }
 
-        backgroundPlaybackLoopTimer = setInterval(function () {
-          if (!video) {
-            clearInterval(backgroundPlaybackLoopTimer);
-            backgroundPlaybackLoopTimer = null;
-            return;
-          }
+        if (!video) {
+          backgroundPlaybackLoopActive = false;
+          return;
+        }
 
-          if (!isInBackgroundContext()) {
-            return;
-          }
+        // Only monitor if actually in background
+        if (!isInBackgroundContext()) {
+          backgroundPlaybackRafId = requestAnimationFrame(backgroundPlaybackRafLoop);
+          return;
+        }
 
-          if (video.ended || video.readyState < 2 || userPausedManually) {
-            return;
-          }
-
-          // If paused in background, attempt to resume
+        // Check conditions but don't bail - we want to keep checking
+        if (!video.ended && video.readyState >= 2 && !userPausedManually) {
+          // If paused in background, attempt to resume (throttled)
           if (video.paused) {
-            ensureBackgroundPlayback('loop-periodic');
+            const now = Date.now();
+            if (now - lastBackgroundResumeAttempt >= BACKGROUND_RESUME_THROTTLE_MS) {
+              lastBackgroundResumeAttempt = now;
+              logBackgroundEvent('RAFLoop_RESUME', { currentTime: video.currentTime, duration: video.duration });
+              ensureBackgroundPlayback('raf-continuous');
+            }
           }
-        }, 2000);
+        }
+
+        backgroundPlaybackRafId = requestAnimationFrame(backgroundPlaybackRafLoop);
+      };
+
+      const startBackgroundPlaybackLoop = function () {
+        if (backgroundPlaybackLoopActive) {
+          return;
+        }
+
+        logBackgroundEvent('START_LOOP', { });
+        backgroundPlaybackLoopActive = true;
+        lastBackgroundResumeAttempt = 0;
+        
+        if (backgroundPlaybackRafId !== null) {
+          cancelAnimationFrame(backgroundPlaybackRafId);
+        }
+        backgroundPlaybackRafId = requestAnimationFrame(backgroundPlaybackRafLoop);
       };
 
       const stopBackgroundPlaybackLoop = function () {
-        if (backgroundPlaybackLoopTimer !== null) {
-          clearInterval(backgroundPlaybackLoopTimer);
-          backgroundPlaybackLoopTimer = null;
+        if (!backgroundPlaybackLoopActive) {
+          return;
+        }
+
+        logBackgroundEvent('STOP_LOOP', { });
+        backgroundPlaybackLoopActive = false;
+        
+        if (backgroundPlaybackRafId !== null) {
+          cancelAnimationFrame(backgroundPlaybackRafId);
+          backgroundPlaybackRafId = null;
         }
       };
 
@@ -1070,27 +1108,44 @@
       }, { once: true });
 
       video.addEventListener('play', function () {
+        logBackgroundEvent('PLAY_EVENT', { duration: video.duration, currentTime: video.currentTime });
         userPausedManually = false;
         // Stop the loop once playback resumes
         stopBackgroundPlaybackLoop();
       });
 
       video.addEventListener('pause', function () {
+        const isBackgroundContext = isInBackgroundContext();
+        logBackgroundEvent('PAUSE_EVENT', { 
+          inProgress: internalResumeInProgress, 
+          isBackground: isBackgroundContext,
+          duration: video.duration,
+          currentTime: video.currentTime
+        });
+        
         if (internalResumeInProgress) {
+          logBackgroundEvent('PAUSE_IGNORED_RESUMING', { });
           return;
         }
 
-        const isBackgroundContext = isInBackgroundContext();
         userPausedManually = !isBackgroundContext;
 
         if (isBackgroundContext) {
+          logBackgroundEvent('PAUSE_TRIGGERED_RECOVERY', { });
           startBackgroundPlaybackLoop();
           ensureBackgroundPlayback('pause');
         }
       });
 
       document.addEventListener('visibilitychange', function () {
-        if (isInBackgroundContext()) {
+        const isBackground = isInBackgroundContext();
+        logBackgroundEvent('VISIBILITY_CHANGE', { 
+          hidden: document.hidden,
+          visibilityState: document.visibilityState,
+          isBackground: isBackground
+        });
+        
+        if (isBackground) {
           startBackgroundPlaybackLoop();
           ensureBackgroundPlayback('visibilitychange');
         } else {
@@ -1099,13 +1154,17 @@
       }, true);
 
       window.addEventListener('blur', function () {
-        if (isInBackgroundContext()) {
+        const isBackground = isInBackgroundContext();
+        logBackgroundEvent('BLUR_EVENT', { isBackground: isBackground });
+        
+        if (isBackground) {
           startBackgroundPlaybackLoop();
-          ensureBackgroundPlayback('blur');
+          ensureBackgroundPlayback('blur-event');
         }
       }, true);
 
       window.addEventListener('focus', function () {
+        logBackgroundEvent('FOCUS_EVENT', { paused: video.paused });
         stopBackgroundPlaybackLoop();
         if (!video.paused) {
           userPausedManually = false;
@@ -1133,8 +1192,11 @@
 
       // Start background playback loop if already in background context.
       if (isInBackgroundContext()) {
+        logBackgroundEvent('INITIAL_BACKGROUND_DETECTED', { });
         startBackgroundPlaybackLoop();
       }
+
+      logBackgroundEvent('BRIDGE_ATTACHED', { videoId: video.id, hasKwikPlayer: !!document.querySelector('video#kwikPlayer') });
     };
 
     // kwik currently uses #kwikPlayer, but keep generic video fallback.
