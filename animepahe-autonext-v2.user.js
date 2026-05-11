@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.5
+// @version      2.0.6
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -182,13 +182,13 @@
     }
 
     const currentPath = normalizePath(location.pathname);
-    const isSeriesLikePath =
+    // Restrict homepage-referrer bootstrap to title pages only.
+    // This avoids episode-1 bounces when homepage links target specific episodes.
+    const isTitlePath =
       /^\/series\/[^/]+$/i.test(currentPath) ||
-      /^\/anime\/[^/]+$/i.test(currentPath) ||
-      /^\/play\//i.test(currentPath) ||
-      /^\/[^/]+-episode-\d+(?:-[^/]+)?$/i.test(currentPath);
+      /^\/anime\/[^/]+$/i.test(currentPath);
 
-    if (!isSeriesLikePath) {
+    if (!isTitlePath) {
       return false;
     }
 
@@ -352,7 +352,8 @@
     }, 900);
   }
 
-  // Captures homepage show-card clicks so selected titles open from episode 1.
+  // Captures homepage show-card clicks so selected title pages can open from episode 1.
+  // Ignore episode/deep links so long-running shows are not bounced through episode 1.
   function captureEpisodeOneIntentFromHomepageClick() {
     if (normalizePath(location.pathname) !== '/') {
       return;
@@ -386,12 +387,11 @@
       }
 
       const destinationPath = normalizePath(parsedUrl.pathname);
-      const isSupportedDestination =
+      const isTitleDestination =
         /^\/series\/[^/]+$/i.test(destinationPath) ||
-        /^\/anime\/[^/]+$/i.test(destinationPath) ||
-        /^\/[^/]+-episode-\d+(?:-[^/]+)?$/i.test(destinationPath);
+        /^\/anime\/[^/]+$/i.test(destinationPath);
 
-      if (!isSupportedDestination) {
+      if (!isTitleDestination) {
         return;
       }
 

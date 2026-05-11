@@ -24,7 +24,7 @@ Use this exact content in your GitHub repository About panel.
 ## Quick Summary
 
 - Script file: animepahe-autonext-v2.user.js
-- Current script version: 2.0.2
+- Current script version: 2.0.6
 - Runs on:
   - https://animepahe.pw/*
   - https://animepahe.com/*
@@ -37,9 +37,28 @@ Use this exact content in your GitHub repository About panel.
   - AutoNext with cancelable countdown.
   - One-time autoplay handoff when navigating to next episode.
    - Homepage show click can start selected title from episode 1 automatically.
+   - Homepage-referrer fallback now only applies on title pages (/series/*, /anime/*), never direct episode/play URLs.
    - Background playback guard for Discord streaming (auto-resume on focus/visibility pause).
   - Auto-unmute and volume restoration after autoplay starts.
   - Persistent ON/OFF toggle state.
+
+## Long-Series Redirect Fix (v2.0.6)
+
+### Finding
+
+On some long-running shows (for example, One Piece), entering from homepage-linked play URLs could briefly route through episode 1 and then return to a later episode. This looked like a double-redirect/bounce behavior in browsing history.
+
+### Root cause
+
+The homepage-referrer and click-capture bootstrap rules were broad enough to include non-title entry links, which could force an episode-1 resolution before the site restored the selected episode.
+
+### Fix
+
+Homepage bootstrap is now restricted to title pages only (`/series/*`, `/anime/*`). Direct episode and play deep-links are no longer overridden by episode-1 bootstrap logic.
+
+### Result
+
+Long-series and deep-link entry flows remain stable while preserving intended episode-1 bootstrap behavior for title-page entry.
 
 ## What Problem This Solves
 

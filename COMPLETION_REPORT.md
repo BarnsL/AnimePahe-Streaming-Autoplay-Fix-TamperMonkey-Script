@@ -133,5 +133,27 @@ From homepage clicks (including `...-episode-6-...` style links):
 4. Existing autoplay handoff logic continues as before.
 
 ## Deployment Status
+✅ **COMPLETE** - Code is deployed to GitHub and ready for user installation
 
-Code and docs updated locally, ready for git commit and push.
+---
+
+# Long-Series Episode Redirect Stabilization (v2.0.6)
+
+## Issue Summary
+When entering certain long-running shows from homepage-linked URLs, navigation could momentarily hit episode 1 and then jump back to a later episode. This created visible history bounce behavior and inconsistent startup flow.
+
+## Root Cause
+- Homepage bootstrap rules were broad enough to trigger on non-title links.
+- Deep-link entries could be briefly overridden by episode-1 bootstrap flow.
+
+## Code Change
+- Updated `shouldBootstrapEpisodeOneFromHomepageReferral()` to apply only on title pages (`/series/*`, `/anime/*`).
+- Updated homepage click intent capture to only store episode-1 intent for title-page links.
+- Bumped userscript metadata version to `2.0.6`.
+
+## Documentation Change
+- Updated README with a dedicated v2.0.6 long-series redirect fix section and behavior notes.
+
+## Expected Behavioral Outcome
+- Direct episode and `/play/*` deep-links are no longer overridden by homepage bootstrap fallback.
+- Episode-1 bootstrap remains available for intended title-page entry flows.
