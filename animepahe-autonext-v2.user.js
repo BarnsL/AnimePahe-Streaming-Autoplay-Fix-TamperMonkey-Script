@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.6
+// @version      2.0.7
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -58,6 +58,7 @@
   const OPEN_EPISODE_ONE_UNTIL_KEY = 'animepahe_autonext_open_episode_one_until';
   const OPEN_EPISODE_ONE_TARGET_KEY = 'animepahe_autonext_open_episode_one_target';
   const OPEN_EPISODE_ONE_TARGET_SERIES_KEY = 'animepahe_autonext_open_episode_one_target_series';
+  const OPEN_EPISODE_ONE_TARGET_SHOW_ID_KEY = 'animepahe_autonext_open_episode_one_target_show_id';
   const OPEN_EPISODE_ONE_TTL_MS = 2 * 60 * 1000;
   // Remembers whether the viewer prefers audio unmuted after autoplay handoff.
   const AUTOPLAY_PREFER_UNMUTED_KEY = 'animepahe_autonext_prefer_unmuted';
@@ -133,6 +134,12 @@
     return '';
   }
 
+  function extractShowIdFromPlayPath(pathLike) {
+    const normalized = normalizePath(pathLike);
+    const playMatch = normalized.match(/^\/play\/([^/]+)\/[^/]+$/i);
+    return playMatch ? playMatch[1].toLowerCase() : '';
+  }
+
   function getCurrentSeriesSlug() {
     const fromPath = extractSeriesSlugFromPath(location.pathname);
     if (fromPath) {
@@ -157,6 +164,7 @@
     const normalizedTargetPath = normalizePath(targetPath);
     writeStoredValue(OPEN_EPISODE_ONE_TARGET_KEY, normalizedTargetPath);
     writeStoredValue(OPEN_EPISODE_ONE_TARGET_SERIES_KEY, extractSeriesSlugFromPath(normalizedTargetPath));
+    writeStoredValue(OPEN_EPISODE_ONE_TARGET_SHOW_ID_KEY, extractShowIdFromPlayPath(normalizedTargetPath));
   }
 
   function hasEpisodeOneIntentForCurrentPage() {
@@ -173,7 +181,13 @@
 
     const targetSeries = String(readStoredValue(OPEN_EPISODE_ONE_TARGET_SERIES_KEY, '') || '').toLowerCase();
     const currentSeries = getCurrentSeriesSlug();
-    return Boolean(targetSeries && currentSeries && targetSeries === currentSeries);
+    if (targetSeries && currentSeries && targetSeries === currentSeries) {
+      return true;
+    }
+
+    const targetShowId = String(readStoredValue(OPEN_EPISODE_ONE_TARGET_SHOW_ID_KEY, '') || '').toLowerCase();
+    const currentShowId = extractShowIdFromPlayPath(currentPath);
+    return Boolean(targetShowId && currentShowId && targetShowId === currentShowId);
   }
 
   function shouldBootstrapEpisodeOneFromHomepageReferral() {
@@ -182,13 +196,12 @@
     }
 
     const currentPath = normalizePath(location.pathname);
-    // Restrict homepage-referrer bootstrap to title pages only.
-    // This avoids episode-1 bounces when homepage links target specific episodes.
-    const isTitlePath =
+    const isBootstrapPath =
       /^\/series\/[^/]+$/i.test(currentPath) ||
-      /^\/anime\/[^/]+$/i.test(currentPath);
+      /^\/anime\/[^/]+$/i.test(currentPath) ||
+      /^\/play\/[^/]+\/[^/]+$/i.test(currentPath);
 
-    if (!isTitlePath) {
+    if (!isBootstrapPath) {
       return false;
     }
 
@@ -204,6 +217,7 @@
     writeStoredValue(OPEN_EPISODE_ONE_UNTIL_KEY, 0);
     writeStoredValue(OPEN_EPISODE_ONE_TARGET_KEY, '');
     writeStoredValue(OPEN_EPISODE_ONE_TARGET_SERIES_KEY, '');
+    writeStoredValue(OPEN_EPISODE_ONE_TARGET_SHOW_ID_KEY, '');
   }
 
   function isKwikHost(hostname) {
@@ -352,8 +366,7 @@
     }, 900);
   }
 
-  // Captures homepage show-card clicks so selected title pages can open from episode 1.
-  // Ignore episode/deep links so long-running shows are not bounced through episode 1.
+  // Captures homepage show-card clicks so selected shows can always open from episode 1.
   function captureEpisodeOneIntentFromHomepageClick() {
     if (normalizePath(location.pathname) !== '/') {
       return;
@@ -387,11 +400,12 @@
       }
 
       const destinationPath = normalizePath(parsedUrl.pathname);
-      const isTitleDestination =
+      const isEpisodeOneBootstrapDestination =
         /^\/series\/[^/]+$/i.test(destinationPath) ||
-        /^\/anime\/[^/]+$/i.test(destinationPath);
+        /^\/anime\/[^/]+$/i.test(destinationPath) ||
+        /^\/play\/[^/]+\/[^/]+$/i.test(destinationPath);
 
-      if (!isTitleDestination) {
+      if (!isEpisodeOneBootstrapDestination) {
         return;
       }
 
@@ -515,6 +529,20 @@
 
       const episodeOneLink = findEpisodeOneLink();
       if (episodeOneLink && episodeOneLink.href) {
+        const targetUrl = new URL(episodeOneLink.href, location.origin);
+        const currentUrl = new URL(location.href);
+        const sameEpisode =
+          normalizePath(targetUrl.pathname) === normalizePath(currentUrl.pathname) &&
+          targetUrl.search === currentUrl.search;
+
+        // If we're already at episode 1, just hand off autoplay and stop.
+        if (sameEpisode) {
+          markAutoplayIntent();
+          clearEpisodeOneIntent();
+          clearInterval(interval);
+          return;
+        }
+
         markAutoplayIntent();
         clearEpisodeOneIntent();
         location.href = episodeOneLink.href;

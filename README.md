@@ -24,7 +24,7 @@ Use this exact content in your GitHub repository About panel.
 ## Quick Summary
 
 - Script file: animepahe-autonext-v2.user.js
-- Current script version: 2.0.6
+- Current script version: 2.0.7
 - Runs on:
   - https://animepahe.pw/*
   - https://animepahe.com/*
