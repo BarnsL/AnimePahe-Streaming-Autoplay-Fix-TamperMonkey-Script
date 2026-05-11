@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.7
+// @version      2.0.8
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -60,6 +60,11 @@
   const OPEN_EPISODE_ONE_TARGET_SERIES_KEY = 'animepahe_autonext_open_episode_one_target_series';
   const OPEN_EPISODE_ONE_TARGET_SHOW_ID_KEY = 'animepahe_autonext_open_episode_one_target_show_id';
   const OPEN_EPISODE_ONE_TTL_MS = 2 * 60 * 1000;
+  // Short lock to prevent post-redirect bounce back to non-episode-1 pages.
+  const EPISODE_ONE_LOCK_UNTIL_KEY = 'animepahe_autonext_episode_one_lock_until';
+  const EPISODE_ONE_LOCK_SHOW_ID_KEY = 'animepahe_autonext_episode_one_lock_show_id';
+  const EPISODE_ONE_LOCK_TARGET_PATH_KEY = 'animepahe_autonext_episode_one_lock_target_path';
+  const EPISODE_ONE_LOCK_TTL_MS = 25 * 1000;
   // Remembers whether the viewer prefers audio unmuted after autoplay handoff.
   const AUTOPLAY_PREFER_UNMUTED_KEY = 'animepahe_autonext_prefer_unmuted';
   // Remembers user volume so auto-unmute can restore previous loudness.
@@ -220,6 +225,46 @@
     writeStoredValue(OPEN_EPISODE_ONE_TARGET_SHOW_ID_KEY, '');
   }
 
+  function markEpisodeOneLock(targetPath) {
+    const normalizedTargetPath = normalizePath(targetPath);
+    writeStoredValue(EPISODE_ONE_LOCK_UNTIL_KEY, Date.now() + EPISODE_ONE_LOCK_TTL_MS);
+    writeStoredValue(EPISODE_ONE_LOCK_TARGET_PATH_KEY, normalizedTargetPath);
+    writeStoredValue(EPISODE_ONE_LOCK_SHOW_ID_KEY, extractShowIdFromPlayPath(normalizedTargetPath));
+  }
+
+  function clearEpisodeOneLock() {
+    writeStoredValue(EPISODE_ONE_LOCK_UNTIL_KEY, 0);
+    writeStoredValue(EPISODE_ONE_LOCK_SHOW_ID_KEY, '');
+    writeStoredValue(EPISODE_ONE_LOCK_TARGET_PATH_KEY, '');
+  }
+
+  function enforceEpisodeOneLockIfNeeded() {
+    const lockUntil = getNumericStoredValue(EPISODE_ONE_LOCK_UNTIL_KEY, 0);
+    if (lockUntil <= Date.now()) {
+      clearEpisodeOneLock();
+      return;
+    }
+
+    const targetPath = normalizePath(readStoredValue(EPISODE_ONE_LOCK_TARGET_PATH_KEY, ''));
+    const targetShowId = String(readStoredValue(EPISODE_ONE_LOCK_SHOW_ID_KEY, '') || '').toLowerCase();
+    if (!targetPath || !targetShowId) {
+      clearEpisodeOneLock();
+      return;
+    }
+
+    const currentPath = normalizePath(location.pathname);
+    const currentShowId = extractShowIdFromPlayPath(currentPath);
+    if (!currentShowId || currentShowId !== targetShowId) {
+      return;
+    }
+
+    if (currentPath === targetPath) {
+      return;
+    }
+
+    location.replace(targetPath);
+  }
+
   function isKwikHost(hostname) {
     return /(?:^|\.)kwik\.[a-z0-9.-]+$/i.test(String(hostname || ''));
   }
@@ -273,7 +318,7 @@
       }
 
       // Try to find and click on a video server option (usually an option/button)
-      const serverDropdown = document.querySelector('select[name="mirror"], .mirror, [data-mirror]');
+      const serverDropdown = document.querySelector('select[name="mirror"], select[name="server"], select[data-mirror], select[id*="mirror" i], select[id*="server" i]');
       if (serverDropdown && serverDropdown.options) {
         // Select first available server (usually index 1, as 0 is "Select Video Server")
         if (serverDropdown.options.length > 1) {
@@ -289,7 +334,8 @@
       // Alternative: look for visible server selection buttons/links
       const serverButtons = Array.from(document.querySelectorAll('button, a, div[role="button"]')).filter(function (el) {
         const text = (el.textContent || '').toLowerCase();
-        return text.includes('server') || text.includes('hd') || text.includes('720') || text.includes('mirror');
+        // Do not use episode-quality keywords (e.g., "720") to avoid clicking episode controls.
+        return text.includes('server') || text.includes('mirror');
       });
 
       if (serverButtons.length > 0) {
@@ -537,12 +583,14 @@
 
         // If we're already at episode 1, just hand off autoplay and stop.
         if (sameEpisode) {
+          markEpisodeOneLock(targetUrl.pathname);
           markAutoplayIntent();
           clearEpisodeOneIntent();
           clearInterval(interval);
           return;
         }
 
+        markEpisodeOneLock(targetUrl.pathname);
         markAutoplayIntent();
         clearEpisodeOneIntent();
         location.href = episodeOneLink.href;
@@ -552,6 +600,7 @@
 
       if (attempts >= maxAttempts) {
         clearEpisodeOneIntent();
+        clearEpisodeOneLock();
         clearInterval(interval);
       }
     }, 300);
@@ -662,6 +711,7 @@
     }
 
     lastUrl = location.href;
+    enforceEpisodeOneLockIfNeeded();
     resetEpisodeState();
     injectBadge();
     runEpisodeOneBootstrapOnAnimePahe();
@@ -932,6 +982,7 @@
   captureEpisodeOneIntentFromHomepageClick();
   injectBadge();
   runEpisodeOneBootstrapOnAnimePahe();
+  enforceEpisodeOneLockIfNeeded();
   autoSelectVideoServerForAutoplay();
   runAutoplayBootstrapOnAnimePahe();
   setTimeout(injectBadge, 1000);
