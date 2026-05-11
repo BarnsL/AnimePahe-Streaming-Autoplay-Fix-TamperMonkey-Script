@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.2
+// @version      2.0.3
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -969,18 +969,41 @@
         timer = setInterval(attemptUnmute, 250);
       };
 
+      // Detects if browser/tab is in background or not focused for Discord streaming scenarios.
+      const isInBackgroundContext = function () {
+        if (typeof document.hidden === 'boolean' && document.hidden) {
+          return true;
+        }
+
+        if (typeof document.visibilityState === 'string' && document.visibilityState === 'hidden') {
+          return true;
+        }
+
+        if (typeof document.hasFocus === 'function' && !document.hasFocus()) {
+          return true;
+        }
+
+        return false;
+      };
+
       // Keeps playback alive when visibility/focus transitions pause the player.
+      // This is especially important for Discord streaming where tab may be backgrounded/minimized.
       const ensureBackgroundPlayback = function (reason) {
         if (!BACKGROUND_PLAYBACK_GUARD) {
           return;
         }
 
-        if (!video || video.ended || !video.paused || video.readyState < 2 || userPausedManually) {
+        if (!video || video.ended || video.readyState < 2 || userPausedManually) {
           return;
         }
 
-        const isBackgroundContext = document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus());
+        const isBackgroundContext = isInBackgroundContext();
         if (!isBackgroundContext) {
+          return;
+        }
+
+        // Already playing, no need to resume
+        if (!video.paused) {
           return;
         }
 
@@ -1002,6 +1025,43 @@
         }
       };
 
+      // Periodic keep-alive loop: prevents native pause during Discord streaming.
+      // Runs every 2 seconds while in background to maintain active playback state.
+      let backgroundPlaybackLoopTimer = null;
+      const startBackgroundPlaybackLoop = function () {
+        if (backgroundPlaybackLoopTimer !== null) {
+          return;
+        }
+
+        backgroundPlaybackLoopTimer = setInterval(function () {
+          if (!video) {
+            clearInterval(backgroundPlaybackLoopTimer);
+            backgroundPlaybackLoopTimer = null;
+            return;
+          }
+
+          if (!isInBackgroundContext()) {
+            return;
+          }
+
+          if (video.ended || video.readyState < 2 || userPausedManually) {
+            return;
+          }
+
+          // If paused in background, attempt to resume
+          if (video.paused) {
+            ensureBackgroundPlayback('loop-periodic');
+          }
+        }, 2000);
+      };
+
+      const stopBackgroundPlaybackLoop = function () {
+        if (backgroundPlaybackLoopTimer !== null) {
+          clearInterval(backgroundPlaybackLoopTimer);
+          backgroundPlaybackLoopTimer = null;
+        }
+      };
+
       // Playback started successfully: consume the one-shot intent.
       video.addEventListener('playing', function () {
         userPausedManually = false;
@@ -1011,6 +1071,8 @@
 
       video.addEventListener('play', function () {
         userPausedManually = false;
+        // Stop the loop once playback resumes
+        stopBackgroundPlaybackLoop();
       });
 
       video.addEventListener('pause', function () {
@@ -1018,21 +1080,33 @@
           return;
         }
 
-        const isBackgroundContext = document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus());
+        const isBackgroundContext = isInBackgroundContext();
         userPausedManually = !isBackgroundContext;
 
         if (isBackgroundContext) {
+          startBackgroundPlaybackLoop();
           ensureBackgroundPlayback('pause');
         }
       });
 
       document.addEventListener('visibilitychange', function () {
-        ensureBackgroundPlayback('visibilitychange');
+        if (isInBackgroundContext()) {
+          startBackgroundPlaybackLoop();
+          ensureBackgroundPlayback('visibilitychange');
+        } else {
+          stopBackgroundPlaybackLoop();
+        }
       }, true);
+
       window.addEventListener('blur', function () {
-        ensureBackgroundPlayback('blur');
+        if (isInBackgroundContext()) {
+          startBackgroundPlaybackLoop();
+          ensureBackgroundPlayback('blur');
+        }
       }, true);
+
       window.addEventListener('focus', function () {
+        stopBackgroundPlaybackLoop();
         if (!video.paused) {
           userPausedManually = false;
         }
@@ -1056,6 +1130,11 @@
       // Immediate try covers cases where metadata is already available.
       attemptAutoplay();
       ensureBackgroundPlayback('initial');
+
+      // Start background playback loop if already in background context.
+      if (isInBackgroundContext()) {
+        startBackgroundPlaybackLoop();
+      }
     };
 
     // kwik currently uses #kwikPlayer, but keep generic video fallback.
