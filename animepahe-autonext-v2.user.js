@@ -1,0 +1,1125 @@
+// ==UserScript==
+// @name         AnimePahe - Auto-Next & Autoplay Fix v2
+// @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
+// @version      2.0.2
+// @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
+// @author       mikutellyourworld
+// @match        https://animepahe.pw/*
+// @match        https://animepahe.com/*
+// @match        https://animepahe.org/*
+// @match        https://animepahe.ch/*
+// @match        https://kwik.cx/*
+// @include      https://kwik.*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// @homepageURL  https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
+// @supportURL   https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/issues
+// @downloadURL  https://raw.githubusercontent.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/main/animepahe-autonext-v2.user.js
+// @updateURL    https://raw.githubusercontent.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/main/animepahe-autonext-v2.user.js
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  try {
+    main();
+  } catch (error) {
+    reportFatalError(error);
+    throw error;
+  }
+
+  function main() {
+
+  /*
+    Runtime model:
+
+    This single userscript runs on two origins:
+    1) animepahe.* watch pages (parent page controller)
+    2) kwik.* embed pages (video bridge)
+
+    The kwik side emits normalized playback messages to the parent.
+    The animepahe side consumes those messages, decides when playback is
+    effectively complete, shows a cancelable countdown, then navigates to
+    the next episode.
+  */
+
+  // Delay before auto-navigation so users can cancel.
+  const COUNTDOWN_SEC = 2;
+  // Fallback guard: if near-end progress stops arriving, force-check end logic.
+  const STALE_MS = 8000;
+  // Tampermonkey storage key for global enable/disable state.
+  const STORAGE_KEY = 'animepahe_autonext_enabled';
+  // Storage key that signals "auto-play the next episode once" after auto-next nav.
+  const AUTOPLAY_UNTIL_KEY = 'animepahe_autonext_autoplay_until';
+  // How long autoplay intent should survive navigation in milliseconds.
+  const AUTOPLAY_TTL_MS = 2 * 60 * 1000;
+  // One-shot intent: from show card click, open selected title at episode 1.
+  const OPEN_EPISODE_ONE_UNTIL_KEY = 'animepahe_autonext_open_episode_one_until';
+  const OPEN_EPISODE_ONE_TARGET_KEY = 'animepahe_autonext_open_episode_one_target';
+  const OPEN_EPISODE_ONE_TARGET_SERIES_KEY = 'animepahe_autonext_open_episode_one_target_series';
+  const OPEN_EPISODE_ONE_TTL_MS = 2 * 60 * 1000;
+  // Remembers whether the viewer prefers audio unmuted after autoplay handoff.
+  const AUTOPLAY_PREFER_UNMUTED_KEY = 'animepahe_autonext_prefer_unmuted';
+  // Remembers user volume so auto-unmute can restore previous loudness.
+  const AUTOPLAY_VOLUME_KEY = 'animepahe_autonext_volume';
+  // When true, keep video playing while tab/window is not focused (Discord stream friendly).
+  const BACKGROUND_PLAYBACK_GUARD = true;
+  // DOM id for the transient countdown toast.
+  const TOAST_ID = 'animepahe-autonext-toast';
+  // DOM id for the fixed ON/OFF badge.
+  const BADGE_ID = 'animepahe-autonext-badge';
+  // Message envelope name shared by parent and iframe contexts.
+  // Bridge payload schema:
+  // {
+  //   type: MESSAGE_TYPE,
+  //   kind: 'progress' | 'ended',
+  //   currentTime?: number,
+  //   duration?: number,
+  //   percent?: number
+  // }
+  const MESSAGE_TYPE = 'animepahe-autonext-progress';
+
+  function getNumericStoredValue(key, fallback) {
+    const rawValue = readStoredValue(key, fallback);
+    const parsedValue = Number(rawValue);
+    return Number.isFinite(parsedValue) ? parsedValue : fallback;
+  }
+
+  // Marks a short-lived autoplay intent that the next page load can consume.
+  function markAutoplayIntent() {
+    writeStoredValue(AUTOPLAY_UNTIL_KEY, Date.now() + AUTOPLAY_TTL_MS);
+  }
+
+  // Returns true while the autoplay intent TTL is still valid.
+  function hasAutoplayIntent() {
+    const autoplayUntil = getNumericStoredValue(AUTOPLAY_UNTIL_KEY, 0);
+    return autoplayUntil > Date.now();
+  }
+
+  // Clears autoplay intent after it has been consumed or expires.
+  function clearAutoplayIntent() {
+    writeStoredValue(AUTOPLAY_UNTIL_KEY, 0);
+  }
+
+  function normalizePath(pathLike) {
+    try {
+      const parsed = new URL(pathLike, location.origin);
+      return parsed.pathname.replace(/\/+$/, '') || '/';
+    } catch (_error) {
+      const text = String(pathLike || '').split('#')[0].split('?')[0];
+      return text.replace(/\/+$/, '') || '/';
+    }
+  }
+
+  function extractSeriesSlugFromPath(pathLike) {
+    const normalized = normalizePath(pathLike);
+
+    const seriesMatch = normalized.match(/^\/series\/([^/]+)$/i);
+    if (seriesMatch) {
+      return seriesMatch[1].toLowerCase();
+    }
+
+    const animeMatch = normalized.match(/^\/anime\/([^/]+)$/i);
+    if (animeMatch) {
+      return animeMatch[1].toLowerCase();
+    }
+
+    const episodeMatch = normalized.match(/^\/([^/]+)-episode-\d+(?:-[^/]+)?$/i);
+    if (episodeMatch) {
+      return episodeMatch[1].toLowerCase();
+    }
+
+    return '';
+  }
+
+  function getCurrentSeriesSlug() {
+    const fromPath = extractSeriesSlugFromPath(location.pathname);
+    if (fromPath) {
+      return fromPath;
+    }
+
+    const seriesLink = document.querySelector('a[href*="/series/"]');
+    if (seriesLink && seriesLink.href) {
+      try {
+        const parsedUrl = new URL(seriesLink.href, location.origin);
+        return extractSeriesSlugFromPath(parsedUrl.pathname);
+      } catch (_error) {
+        return '';
+      }
+    }
+
+    return '';
+  }
+
+  function markEpisodeOneIntent(targetPath) {
+    writeStoredValue(OPEN_EPISODE_ONE_UNTIL_KEY, Date.now() + OPEN_EPISODE_ONE_TTL_MS);
+    const normalizedTargetPath = normalizePath(targetPath);
+    writeStoredValue(OPEN_EPISODE_ONE_TARGET_KEY, normalizedTargetPath);
+    writeStoredValue(OPEN_EPISODE_ONE_TARGET_SERIES_KEY, extractSeriesSlugFromPath(normalizedTargetPath));
+  }
+
+  function hasEpisodeOneIntentForCurrentPage() {
+    const until = getNumericStoredValue(OPEN_EPISODE_ONE_UNTIL_KEY, 0);
+    if (until <= Date.now()) {
+      return false;
+    }
+
+    const targetPath = normalizePath(readStoredValue(OPEN_EPISODE_ONE_TARGET_KEY, ''));
+    const currentPath = normalizePath(location.pathname);
+    if (targetPath && targetPath === currentPath) {
+      return true;
+    }
+
+    const targetSeries = String(readStoredValue(OPEN_EPISODE_ONE_TARGET_SERIES_KEY, '') || '').toLowerCase();
+    const currentSeries = getCurrentSeriesSlug();
+    return Boolean(targetSeries && currentSeries && targetSeries === currentSeries);
+  }
+
+  function shouldBootstrapEpisodeOneFromHomepageReferral() {
+    if (normalizePath(location.pathname) === '/') {
+      return false;
+    }
+
+    const currentPath = normalizePath(location.pathname);
+    const isSeriesLikePath =
+      /^\/series\/[^/]+$/i.test(currentPath) ||
+      /^\/anime\/[^/]+$/i.test(currentPath) ||
+      /^\/play\//i.test(currentPath) ||
+      /^\/[^/]+-episode-\d+(?:-[^/]+)?$/i.test(currentPath);
+
+    if (!isSeriesLikePath) {
+      return false;
+    }
+
+    try {
+      const referrerUrl = new URL(document.referrer || '', location.origin);
+      return referrerUrl.origin === location.origin && normalizePath(referrerUrl.pathname) === '/';
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function clearEpisodeOneIntent() {
+    writeStoredValue(OPEN_EPISODE_ONE_UNTIL_KEY, 0);
+    writeStoredValue(OPEN_EPISODE_ONE_TARGET_KEY, '');
+    writeStoredValue(OPEN_EPISODE_ONE_TARGET_SERIES_KEY, '');
+  }
+
+  function isKwikHost(hostname) {
+    return /(?:^|\.)kwik\.[a-z0-9.-]+$/i.test(String(hostname || ''));
+  }
+
+  // Branch A: if we are in the provider iframe, only run the bridge logic.
+  if (isKwikHost(location.hostname)) {
+    initKwikBridge();
+    return;
+  }
+
+  // Branch B: only run parent-page logic on supported AnimePahe domains.
+  if (!/animepahe\.(pw|com|org|ch)$/i.test(location.hostname)) {
+    return;
+  }
+
+  // True after we decide to move to next episode; prevents duplicate triggers.
+  let triggered = false;
+  // Tracks current URL for SPA-like and history navigation resets.
+  let lastUrl = location.href;
+  // Last known playback values reported by kwik bridge.
+  let lastTime = 0;
+  let lastDuration = 0;
+  let lastPercent = 0;
+  // Timestamp of the most recent progress message (for stale fallback).
+  let lastTimeMessageMs = 0;
+  // Handles for active timers so we can clear/re-arm safely.
+  let staleTimer = null;
+  let countdownTimer = null;
+
+  // On arrival to the next episode page, try to pass AnimePahe's "Click to load" gate.
+  function runAutoplayBootstrapOnAnimePahe() {
+    if (!hasAutoplayIntent()) {
+      return;
+    }
+
+    const clickLoadGate = function () {
+      // Prefer known clickable controls first if present.
+      const directTarget = document.querySelector(
+        '[title="Click to load"], [aria-label="Click to load"], .reload, .play'
+      );
+
+      if (directTarget && typeof directTarget.click === 'function') {
+        directTarget.click();
+        return true;
+      }
+
+      // Fallback: match visible text nodes used by the center "Click to load" overlay.
+      const candidates = Array.from(document.querySelectorAll('button, a, div, span'));
+      const textMatch = candidates.find(function (element) {
+        if (!element || element.offsetParent === null) {
+          return false;
+        }
+
+        const text = (element.textContent || '').trim().toLowerCase();
+        return text === 'click to load' || text.includes('click to load');
+      });
+
+      if (textMatch && typeof textMatch.click === 'function') {
+        textMatch.click();
+        return true;
+      }
+
+      return false;
+    };
+
+    // Re-attempt briefly because AnimePahe mounts player controls asynchronously.
+    let attempts = 0;
+    const maxAttempts = 16;
+    const interval = setInterval(function () {
+      attempts += 1;
+
+      if (!hasAutoplayIntent()) {
+        clearInterval(interval);
+        return;
+      }
+
+      // Once iframe is present, kwik-side logic takes over actual playback start.
+      const kwikFrame = document.querySelector('iframe[src*="//kwik."]');
+      if (kwikFrame) {
+        clearInterval(interval);
+        return;
+      }
+
+      clickLoadGate();
+
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+      }
+    }, 900);
+  }
+
+  // Captures homepage show-card clicks so selected titles open from episode 1.
+  function captureEpisodeOneIntentFromHomepageClick() {
+    if (normalizePath(location.pathname) !== '/') {
+      return;
+    }
+
+    document.addEventListener('click', function (event) {
+      const source = event.target;
+      if (!source || typeof source.closest !== 'function') {
+        return;
+      }
+
+      const link = source.closest('a[href], [data-href], [data-url]');
+      if (!link) {
+        return;
+      }
+
+      let href = link.getAttribute('href') || link.getAttribute('data-href') || link.getAttribute('data-url') || '';
+      if (!href && typeof link.href === 'string') {
+        href = link.href;
+      }
+
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(href, location.origin);
+      } catch (_error) {
+        return;
+      }
+
+      if (parsedUrl.origin !== location.origin) {
+        return;
+      }
+
+      const destinationPath = normalizePath(parsedUrl.pathname);
+      const isSupportedDestination =
+        /^\/series\/[^/]+$/i.test(destinationPath) ||
+        /^\/anime\/[^/]+$/i.test(destinationPath) ||
+        /^\/[^/]+-episode-\d+(?:-[^/]+)?$/i.test(destinationPath);
+
+      if (!isSupportedDestination) {
+        return;
+      }
+
+      markEpisodeOneIntent(destinationPath);
+    }, true);
+  }
+
+  function readEpisodeNumberFromAnchor(anchor) {
+    if (!anchor) {
+      return null;
+    }
+
+    const sources = [
+      anchor.getAttribute('data-episode'),
+      anchor.dataset ? anchor.dataset.episode : null,
+      anchor.getAttribute('title'),
+      anchor.textContent,
+      anchor.href
+    ];
+
+    for (const source of sources) {
+      const text = String(source || '').trim();
+      if (!text) {
+        continue;
+      }
+
+      const namedMatch = text.match(/(?:episode|ep)\s*0*(\d+)/i);
+      if (namedMatch) {
+        return Number(namedMatch[1]);
+      }
+
+      const queryMatch = text.match(/[?&](?:ep|episode)=0*(\d+)/i);
+      if (queryMatch) {
+        return Number(queryMatch[1]);
+      }
+
+      if (/^0*\d+$/.test(text)) {
+        return Number(text);
+      }
+    }
+
+    return null;
+  }
+
+  function findEpisodeOneLink() {
+    const currentSeries = getCurrentSeriesSlug();
+
+    const rawLinks = Array.from(document.querySelectorAll(
+      '#scrollArea a.dropdown-item[href], .dropdown-menu a.dropdown-item[href], a.dropdown-item[href], a[href*="/play/"], a[href*="-episode-"]'
+    ));
+
+    const candidateLinks = rawLinks.filter(function (link) {
+      if (!link || !link.href) {
+        return false;
+      }
+
+      try {
+        const parsedUrl = new URL(link.href, location.origin);
+        if (parsedUrl.origin !== location.origin) {
+          return false;
+        }
+
+        const normalizedPath = normalizePath(parsedUrl.pathname);
+        const isSupportedEpisodeLink = /^\/play\//i.test(normalizedPath) || /^\/[^/]+-episode-\d+(?:-[^/]+)?$/i.test(normalizedPath);
+        if (!isSupportedEpisodeLink) {
+          return false;
+        }
+
+        if (!currentSeries) {
+          return true;
+        }
+
+        const linkSeries = extractSeriesSlugFromPath(normalizedPath);
+        return !linkSeries || linkSeries === currentSeries;
+      } catch (_error) {
+        return false;
+      }
+    });
+
+    const exactEpisodeOne = candidateLinks.find(function (link) {
+      return readEpisodeNumberFromAnchor(link) === 1;
+    });
+
+    if (exactEpisodeOne) {
+      return exactEpisodeOne;
+    }
+
+    let bestLink = null;
+    let lowestEpisode = Infinity;
+    for (const link of candidateLinks) {
+      const episodeNumber = readEpisodeNumberFromAnchor(link);
+      if (Number.isFinite(episodeNumber) && episodeNumber > 0 && episodeNumber < lowestEpisode) {
+        lowestEpisode = episodeNumber;
+        bestLink = link;
+      }
+    }
+
+    if (bestLink) {
+      return bestLink;
+    }
+
+    return document.querySelector('#scrollArea a[href*="/play/"], a.btn[href*="/play/"]');
+  }
+
+  // On title page with pending intent, jump to episode 1 and pass autoplay intent.
+  function runEpisodeOneBootstrapOnAnimePahe() {
+    const shouldBootstrapFromReferral = shouldBootstrapEpisodeOneFromHomepageReferral();
+    if (!hasEpisodeOneIntentForCurrentPage() && !shouldBootstrapFromReferral) {
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 20;
+    const interval = setInterval(function () {
+      attempts += 1;
+
+      if (!hasEpisodeOneIntentForCurrentPage() && !shouldBootstrapFromReferral) {
+        clearInterval(interval);
+        return;
+      }
+
+      const episodeOneLink = findEpisodeOneLink();
+      if (episodeOneLink && episodeOneLink.href) {
+        markAutoplayIntent();
+        clearEpisodeOneIntent();
+        location.href = episodeOneLink.href;
+        clearInterval(interval);
+        return;
+      }
+
+      if (attempts >= maxAttempts) {
+        clearEpisodeOneIntent();
+        clearInterval(interval);
+      }
+    }, 300);
+  }
+
+  function readStoredValue(key, fallback) {
+    try {
+      if (typeof GM_getValue === 'function') {
+        return GM_getValue(key, fallback);
+      }
+    } catch (_error) {
+      // Fall through to localStorage fallback.
+    }
+
+    try {
+      const rawValue = localStorage.getItem(key);
+      if (rawValue === null) {
+        return fallback;
+      }
+
+      if (rawValue === 'true') {
+        return true;
+      }
+
+      if (rawValue === 'false') {
+        return false;
+      }
+
+      return rawValue;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+
+  function writeStoredValue(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch (_error) {
+      // Fall through to localStorage fallback.
+    }
+
+    try {
+      localStorage.setItem(key, String(value));
+    } catch (_error) {
+      // Ignore storage failures; the script can still run for this page load.
+    }
+  }
+
+  // Reads persisted toggle state (default ON).
+  function isEnabled() {
+    return readStoredValue(STORAGE_KEY, true);
+  }
+
+  // Persists toggle state and refreshes badge color/text immediately.
+  function setEnabled(nextValue) {
+    writeStoredValue(STORAGE_KEY, nextValue);
+    updateBadge(nextValue);
+  }
+
+  // Convenience handler for badge click.
+  function toggleEnabled() {
+    setEnabled(!isEnabled());
+  }
+
+  // Clears countdown interval if currently running.
+  function clearCountdown() {
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+  }
+
+  // Clears stale fallback timeout if currently armed.
+  function clearStaleTimer() {
+    if (staleTimer) {
+      clearTimeout(staleTimer);
+      staleTimer = null;
+    }
+  }
+
+  // Removes the countdown toast from the page if it exists.
+  function removeToast() {
+    const existing = document.getElementById(TOAST_ID);
+    if (existing) {
+      existing.remove();
+    }
+  }
+
+  // Resets all episode-scoped state whenever episode URL changes.
+  function resetEpisodeState() {
+    triggered = false;
+    lastTime = 0;
+    lastDuration = 0;
+    lastPercent = 0;
+    lastTimeMessageMs = 0;
+    clearCountdown();
+    clearStaleTimer();
+    removeToast();
+  }
+
+  // Detects navigation changes and resets state for the new episode.
+  function onEpisodeChange() {
+    if (location.href === lastUrl) {
+      return;
+    }
+
+    lastUrl = location.href;
+    resetEpisodeState();
+    injectBadge();
+    runEpisodeOneBootstrapOnAnimePahe();
+    runAutoplayBootstrapOnAnimePahe();
+  }
+
+  // Updates the visible ON/OFF badge based on effective enabled state.
+  function updateBadge(enabled) {
+    const badge = document.getElementById(BADGE_ID);
+    if (!badge) {
+      return;
+    }
+
+    badge.textContent = 'AutoNext ' + (enabled ? 'ON' : 'OFF');
+    badge.style.background = enabled ? '#19b56b' : '#666';
+  }
+
+  // Injects a floating toggle badge once; subsequent calls are idempotent.
+  function injectBadge() {
+    if (!document.body || document.getElementById(BADGE_ID)) {
+      updateBadge(isEnabled());
+      return;
+    }
+
+    const badge = document.createElement('div');
+    badge.id = BADGE_ID;
+    badge.style.cssText = [
+      'position:fixed',
+      'top:12px',
+      'right:12px',
+      'z-index:2147483646',
+      'background:#19b56b',
+      'color:#fff',
+      'padding:6px 14px',
+      'border-radius:6px',
+      'font:bold 12px sans-serif',
+      'cursor:pointer',
+      'box-shadow:0 2px 8px rgba(0,0,0,.4)',
+      'transition:background .2s'
+    ].join(';');
+
+    badge.title = 'Toggle Auto-Next';
+    badge.addEventListener('click', toggleEnabled);
+    document.body.appendChild(badge);
+    updateBadge(isEnabled());
+  }
+
+  // Arms stale fallback only when we're close enough to the episode end.
+  function armStaleTimer() {
+    clearStaleTimer();
+
+    if (lastPercent < 90) {
+      return;
+    }
+
+    staleTimer = setTimeout(function () {
+      if (triggered || !isEnabled()) {
+        return;
+      }
+
+      const silenceMs = Date.now() - lastTimeMessageMs;
+      const remaining = lastDuration > 0 ? (lastDuration - lastTime) : Infinity;
+      const isEffectivelyEnded = remaining <= 0.25 || lastPercent >= 99.95;
+      if (silenceMs >= STALE_MS && isEffectivelyEnded) {
+        fireNextEpisode('stale-fallback');
+      }
+    }, STALE_MS);
+  }
+
+  // Primary selector for AnimePahe's explicit next-episode anchor.
+  function getNextEpisodeLink() {
+    return document.querySelector('a[title="Play Next Episode"]');
+  }
+
+  // Navigates to next episode using strongest control first, then fallback.
+  function attemptNextEpisode() {
+    const nextLink = getNextEpisodeLink();
+    if (nextLink && nextLink.href) {
+      // Persist one-shot autoplay intent before leaving this episode.
+      markAutoplayIntent();
+      location.href = nextLink.href;
+      return true;
+    }
+
+    const activeEpisode = document.querySelector('#scrollArea .dropdown-item.active, .dropdown-item.active');
+    const nextEpisodeItem = activeEpisode ? activeEpisode.nextElementSibling : null;
+    if (nextEpisodeItem && nextEpisodeItem.tagName === 'A' && nextEpisodeItem.href) {
+      // Persist one-shot autoplay intent before fallback navigation too.
+      markAutoplayIntent();
+      location.href = nextEpisodeItem.href;
+      return true;
+    }
+
+    return false;
+  }
+
+  // Renders a cancelable countdown toast; callback fires on zero.
+  function showCountdown(seconds, callback) {
+    let remaining = seconds;
+
+    clearCountdown();
+    removeToast();
+
+    const toast = document.createElement('div');
+    toast.id = TOAST_ID;
+    toast.style.cssText = [
+      'position:fixed',
+      'bottom:80px',
+      'right:24px',
+      'z-index:2147483647',
+      'background:rgba(15,15,25,.95)',
+      'color:#fff',
+      'padding:14px 20px',
+      'border-radius:10px',
+      'font:bold 14px sans-serif',
+      'box-shadow:0 4px 24px rgba(0,0,0,.6)',
+      'display:flex',
+      'flex-direction:column',
+      'gap:8px',
+      'min-width:220px',
+      'border:1px solid rgba(0,209,178,.35)'
+    ].join(';');
+
+    const label = document.createElement('span');
+    label.style.fontSize = '15px';
+    label.textContent = 'Next episode in ' + remaining + 's...';
+    toast.appendChild(label);
+
+    const cancelButton = document.createElement('button');
+    cancelButton.textContent = 'Cancel';
+    cancelButton.style.cssText = [
+      'background:#d43',
+      'color:#fff',
+      'border:none',
+      'border-radius:5px',
+      'padding:5px 14px',
+      'cursor:pointer',
+      'font-size:13px',
+      'font-weight:bold',
+      'align-self:flex-end'
+    ].join(';');
+
+    cancelButton.addEventListener('click', function () {
+      clearCountdown();
+      removeToast();
+      triggered = false;
+      armStaleTimer();
+    });
+
+    toast.appendChild(cancelButton);
+    document.body.appendChild(toast);
+
+    countdownTimer = setInterval(function () {
+      remaining -= 1;
+      label.textContent = 'Next episode in ' + remaining + 's...';
+
+      if (remaining <= 0) {
+        clearCountdown();
+        removeToast();
+        callback();
+      }
+    }, 1000);
+  }
+
+  // Central trigger path: guard, log, toast, and navigation attempt.
+  function fireNextEpisode(source) {
+    if (triggered || !isEnabled()) {
+      return;
+    }
+
+    triggered = true;
+    clearStaleTimer();
+
+    console.log(
+      '[AnimePahe AutoNext] Firing: ' + source +
+      ' | time=' + lastTime +
+      ' | duration=' + lastDuration +
+      ' | percent=' + lastPercent
+    );
+
+    showCountdown(COUNTDOWN_SEC, function () {
+      if (!attemptNextEpisode()) {
+        triggered = false;
+      }
+    });
+  }
+
+  // kwik sometimes sends plain ended-style messages to parent; accept those too.
+  function isNativeEndedMessage(data) {
+    if (data === 'ended') {
+      return true;
+    }
+
+    if (!data || typeof data !== 'object') {
+      return false;
+    }
+
+    return data.event === 'ended' || data.type === 'ended' || data.playerState === 0;
+  }
+
+  // Consumes progress/ended messages from kwik and evaluates end conditions.
+  function handleBridgeMessage(event) {
+    if (!isEnabled() || triggered) {
+      return;
+    }
+
+    // Security gate: only accept provider messages from secure kwik origins.
+    let originUrl;
+    try {
+      originUrl = new URL(event.origin);
+    } catch (_error) {
+      return;
+    }
+
+    if (originUrl.protocol !== 'https:' || !isKwikHost(originUrl.hostname)) {
+      return;
+    }
+
+    const data = event.data;
+    if (isNativeEndedMessage(data)) {
+      fireNextEpisode('ended-native');
+      return;
+    }
+
+    if (!data || data.type !== MESSAGE_TYPE) {
+      return;
+    }
+
+    if (data.kind === 'progress') {
+      if (typeof data.currentTime !== 'number' || typeof data.duration !== 'number') {
+        return;
+      }
+
+      lastTimeMessageMs = Date.now();
+      lastTime = data.currentTime;
+      lastDuration = data.duration;
+      lastPercent = typeof data.percent === 'number' ? data.percent : 0;
+
+      armStaleTimer();
+      return;
+    }
+
+    if (data.kind === 'ended') {
+      fireNextEpisode('ended-bridge');
+    }
+  }
+
+  // Listen for bridge traffic from kwik iframe.
+  window.addEventListener('message', handleBridgeMessage);
+
+  // Patch history APIs so SPA-like route updates still trigger episode reset.
+  const originalPushState = history.pushState;
+  history.pushState = function () {
+    originalPushState.apply(this, arguments);
+    onEpisodeChange();
+  };
+
+  const originalReplaceState = history.replaceState;
+  history.replaceState = function () {
+    originalReplaceState.apply(this, arguments);
+    onEpisodeChange();
+  };
+
+  window.addEventListener('popstate', onEpisodeChange);
+
+  // Re-inject defensively in case page scripts mutate the DOM late.
+  captureEpisodeOneIntentFromHomepageClick();
+  injectBadge();
+  runEpisodeOneBootstrapOnAnimePahe();
+  runAutoplayBootstrapOnAnimePahe();
+  setTimeout(injectBadge, 1000);
+  setTimeout(injectBadge, 3000);
+
+  // Poll URL changes as an additional fallback for non-standard navigation.
+  setInterval(onEpisodeChange, 1000);
+
+  console.log('[AnimePahe AutoNext] Loaded. Waiting for player bridge messages.');
+
+  // kwik-side bridge: capture native video state and post to parent page.
+  function initKwikBridge() {
+    // Snapshot autoplay intent once at startup. If true, attempt muted autoplay.
+    const shouldAutoplay = hasAutoplayIntent();
+    // Persisted user preference: after autoplay starts, should we attempt to unmute?
+    const preferUnmuted = readStoredValue(AUTOPLAY_PREFER_UNMUTED_KEY, true) !== false;
+    const rememberedVolume = Math.max(0, Math.min(1, getNumericStoredValue(AUTOPLAY_VOLUME_KEY, 1)));
+
+    // Sends payload to top frame, falling back to parent frame if needed.
+    const sendMessage = function (payload) {
+      try {
+        window.top.postMessage(payload, '*');
+      } catch (_error) {
+        window.parent.postMessage(payload, '*');
+      }
+    };
+
+    // Binds listeners once per video element instance.
+    const attachBridge = function (video) {
+      if (!video || video.dataset.autonextBridgeAttached === 'true') {
+        return;
+      }
+
+      video.dataset.autonextBridgeAttached = 'true';
+      let userPausedManually = false;
+      let internalResumeInProgress = false;
+
+      // Normalized progress payload used by parent threshold logic.
+      const sendProgress = function () {
+        const duration = Number(video.duration);
+        const currentTime = Number(video.currentTime);
+        const percent = duration > 0 ? (currentTime / duration) * 100 : 0;
+
+        sendMessage({
+          type: MESSAGE_TYPE,
+          kind: 'progress',
+          currentTime: currentTime,
+          duration: duration,
+          percent: percent
+        });
+      };
+
+      // Browser policies generally permit muted autoplay after a prior user play.
+      let suppressPreferenceWriteUntil = 0;
+      const attemptAutoplay = function () {
+        if (!shouldAutoplay || video.dataset.autonextAutoplayAttempted === 'true') {
+          return;
+        }
+
+        video.dataset.autonextAutoplayAttempted = 'true';
+        // Avoid learning a false muted preference from policy-mandated muted start.
+        suppressPreferenceWriteUntil = Date.now() + 5000;
+        video.muted = true;
+
+        try {
+          const playPromise = video.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(function (error) {
+              console.warn('[AnimePahe AutoNext] Autoplay attempt was blocked.', error);
+            });
+          }
+        } catch (error) {
+          console.warn('[AnimePahe AutoNext] Autoplay call threw.', error);
+        }
+      };
+
+      // Persists current viewer audio preference for future autoplay handoffs.
+      const persistAudioPreference = function () {
+        const shouldSuppressPersist = shouldAutoplay &&
+          video.dataset.autonextAutoplayAttempted === 'true' &&
+          Date.now() < suppressPreferenceWriteUntil &&
+          video.muted;
+
+        if (shouldSuppressPersist) {
+          return;
+        }
+
+        const hasAudibleOutput = !video.muted && Number(video.volume) > 0;
+        writeStoredValue(AUTOPLAY_PREFER_UNMUTED_KEY, hasAudibleOutput);
+        writeStoredValue(AUTOPLAY_VOLUME_KEY, Number(video.volume));
+      };
+
+      // After muted autoplay starts, attempt to restore audible playback.
+      // Retries are needed because some player layers race to re-apply muted state.
+      const restoreAudioAfterAutoplay = function () {
+        if (!shouldAutoplay || !preferUnmuted) {
+          return;
+        }
+
+        let attempts = 0;
+        const maxAttempts = 24;
+        let timer = null;
+        const attemptUnmute = function () {
+          attempts += 1;
+
+          video.muted = false;
+          if (Number(video.volume) <= 0) {
+            video.volume = rememberedVolume > 0 ? rememberedVolume : 1;
+          }
+
+          if ((!video.muted && Number(video.volume) > 0) || attempts >= maxAttempts) {
+            clearInterval(timer);
+            if (!video.muted && Number(video.volume) > 0) {
+              persistAudioPreference();
+            }
+          }
+        };
+
+        attemptUnmute();
+        timer = setInterval(attemptUnmute, 250);
+      };
+
+      // Keeps playback alive when visibility/focus transitions pause the player.
+      const ensureBackgroundPlayback = function (reason) {
+        if (!BACKGROUND_PLAYBACK_GUARD) {
+          return;
+        }
+
+        if (!video || video.ended || !video.paused || video.readyState < 2 || userPausedManually) {
+          return;
+        }
+
+        const isBackgroundContext = document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus());
+        if (!isBackgroundContext) {
+          return;
+        }
+
+        internalResumeInProgress = true;
+        try {
+          const playPromise = video.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(function (error) {
+              console.warn('[AnimePahe AutoNext] Background resume blocked (' + reason + ').', error);
+            }).finally(function () {
+              internalResumeInProgress = false;
+            });
+          } else {
+            internalResumeInProgress = false;
+          }
+        } catch (error) {
+          internalResumeInProgress = false;
+          console.warn('[AnimePahe AutoNext] Background resume threw (' + reason + ').', error);
+        }
+      };
+
+      // Playback started successfully: consume the one-shot intent.
+      video.addEventListener('playing', function () {
+        userPausedManually = false;
+        clearAutoplayIntent();
+        restoreAudioAfterAutoplay();
+      }, { once: true });
+
+      video.addEventListener('play', function () {
+        userPausedManually = false;
+      });
+
+      video.addEventListener('pause', function () {
+        if (internalResumeInProgress) {
+          return;
+        }
+
+        const isBackgroundContext = document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus());
+        userPausedManually = !isBackgroundContext;
+
+        if (isBackgroundContext) {
+          ensureBackgroundPlayback('pause');
+        }
+      });
+
+      document.addEventListener('visibilitychange', function () {
+        ensureBackgroundPlayback('visibilitychange');
+      }, true);
+      window.addEventListener('blur', function () {
+        ensureBackgroundPlayback('blur');
+      }, true);
+      window.addEventListener('focus', function () {
+        if (!video.paused) {
+          userPausedManually = false;
+        }
+      }, true);
+
+      video.addEventListener('timeupdate', sendProgress);
+      video.addEventListener('durationchange', sendProgress);
+      video.addEventListener('loadedmetadata', sendProgress);
+      video.addEventListener('canplay', attemptAutoplay);
+      video.addEventListener('volumechange', persistAudioPreference);
+      video.addEventListener('ended', function () {
+        sendMessage({
+          type: MESSAGE_TYPE,
+          kind: 'ended'
+        });
+      });
+
+      // Capture baseline preference as soon as the element is attached.
+      persistAudioPreference();
+
+      // Immediate try covers cases where metadata is already available.
+      attemptAutoplay();
+      ensureBackgroundPlayback('initial');
+    };
+
+    // kwik currently uses #kwikPlayer, but keep generic video fallback.
+    const findVideo = function () {
+      return document.querySelector('video#kwikPlayer, video');
+    };
+
+    // Tries to attach immediately and whenever DOM changes add/replace video.
+    const start = function () {
+      const video = findVideo();
+      if (video) {
+        attachBridge(video);
+      }
+    };
+
+    start();
+
+    // Required because provider pages may lazily mount player markup.
+    const observer = new MutationObserver(start);
+    observer.observe(document.documentElement || document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  }
+
+  function reportFatalError(error) {
+    try {
+      const existing = document.getElementById('animepahe-autonext-fatal');
+      if (existing) {
+        existing.remove();
+      }
+
+      const panel = document.createElement('div');
+      panel.id = 'animepahe-autonext-fatal';
+      panel.style.cssText = [
+        'position:fixed',
+        'top:12px',
+        'left:12px',
+        'z-index:2147483647',
+        'max-width:420px',
+        'background:#8b0000',
+        'color:#fff',
+        'padding:12px 14px',
+        'border-radius:8px',
+        'font:12px/1.4 sans-serif',
+        'box-shadow:0 4px 18px rgba(0,0,0,.45)',
+        'white-space:pre-wrap'
+      ].join(';');
+
+      const message = error && error.message ? error.message : String(error);
+      panel.textContent = 'AnimePahe AutoNext failed to load.\n' + message;
+
+      if (document.body) {
+        document.body.appendChild(panel);
+      } else {
+        window.addEventListener('DOMContentLoaded', function onReady() {
+          window.removeEventListener('DOMContentLoaded', onReady);
+          document.body.appendChild(panel);
+        });
+      }
+    } catch (_error) {
+      // Ignore secondary reporting failures.
+    }
+  }
+})();
