@@ -235,6 +235,61 @@
   let staleTimer = null;
   let countdownTimer = null;
 
+  // Auto-selects a video server when autoplay intent is active
+  function autoSelectVideoServerForAutoplay() {
+    if (!hasAutoplayIntent()) {
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 20;
+    const interval = setInterval(function () {
+      attempts += 1;
+
+      if (!hasAutoplayIntent()) {
+        clearInterval(interval);
+        return;
+      }
+
+      // Check if a kwik iframe is already loaded (video server was selected)
+      const kwikFrame = document.querySelector('iframe[src*="//kwik."]');
+      if (kwikFrame) {
+        clearInterval(interval);
+        return;
+      }
+
+      // Try to find and click on a video server option (usually an option/button)
+      const serverDropdown = document.querySelector('select[name="mirror"], .mirror, [data-mirror]');
+      if (serverDropdown && serverDropdown.options) {
+        // Select first available server (usually index 1, as 0 is "Select Video Server")
+        if (serverDropdown.options.length > 1) {
+          serverDropdown.selectedIndex = 1;
+          // Trigger change event
+          const changeEvent = new Event('change', { bubbles: true });
+          serverDropdown.dispatchEvent(changeEvent);
+          clearInterval(interval);
+          return;
+        }
+      }
+
+      // Alternative: look for visible server selection buttons/links
+      const serverButtons = Array.from(document.querySelectorAll('button, a, div[role="button"]')).filter(function (el) {
+        const text = (el.textContent || '').toLowerCase();
+        return text.includes('server') || text.includes('hd') || text.includes('720') || text.includes('mirror');
+      });
+
+      if (serverButtons.length > 0) {
+        serverButtons[0].click();
+        clearInterval(interval);
+        return;
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+      }
+    }, 600);
+  }
+
   // On arrival to the next episode page, try to pass AnimePahe's "Click to load" gate.
   function runAutoplayBootstrapOnAnimePahe() {
     if (!hasAutoplayIntent()) {
@@ -582,6 +637,7 @@
     resetEpisodeState();
     injectBadge();
     runEpisodeOneBootstrapOnAnimePahe();
+    autoSelectVideoServerForAutoplay();
     runAutoplayBootstrapOnAnimePahe();
   }
 
@@ -848,9 +904,11 @@
   captureEpisodeOneIntentFromHomepageClick();
   injectBadge();
   runEpisodeOneBootstrapOnAnimePahe();
+  autoSelectVideoServerForAutoplay();
   runAutoplayBootstrapOnAnimePahe();
   setTimeout(injectBadge, 1000);
   setTimeout(injectBadge, 3000);
+  setTimeout(autoSelectVideoServerForAutoplay, 1500);
 
   // Poll URL changes as an additional fallback for non-standard navigation.
   setInterval(onEpisodeChange, 1000);
@@ -990,6 +1048,18 @@
           return true;
         }
 
+        // Additional check: if window is not active or tab is not focused
+        if (typeof window.onblur !== 'undefined') {
+          try {
+            // Some browsers hide this but we can infer from document.activeElement
+            if (document.activeElement === document.body) {
+              return false; // Likely focused
+            }
+          } catch (_) {
+            // Ignore errors
+          }
+        }
+
         return false;
       };
 
@@ -1037,7 +1107,7 @@
       let backgroundPlaybackLoopActive = false;
       let backgroundPlaybackRafId = null;
       let lastBackgroundResumeAttempt = 0;
-      const BACKGROUND_RESUME_THROTTLE_MS = 300; // Prevent resume spam
+      const BACKGROUND_RESUME_THROTTLE_MS = 150; // More aggressive: 150ms instead of 300ms
 
       const backgroundPlaybackRafLoop = function () {
         if (!backgroundPlaybackLoopActive) {
@@ -1173,7 +1243,14 @@
 
       video.addEventListener('timeupdate', sendProgress);
       video.addEventListener('durationchange', sendProgress);
-      video.addEventListener('loadedmetadata', sendProgress);
+      video.addEventListener('loadedmetadata', function () {
+        sendProgress();
+        // Start background loop as soon as metadata is ready
+        if (isInBackgroundContext()) {
+          logBackgroundEvent('LOADEDMETADATA_BACKGROUND', { });
+          startBackgroundPlaybackLoop();
+        }
+      });
       video.addEventListener('canplay', attemptAutoplay);
       video.addEventListener('volumechange', persistAudioPreference);
       video.addEventListener('ended', function () {
