@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.9
+// @version      2.0.10
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -23,14 +23,21 @@
   'use strict';
 
   /*
-    Cloudflare may serve its verification document at the normal AnimePahe
-    URL, so metadata @exclude rules cannot reliably keep the userscript out.
-    Exit before main() touches storage, patches history, starts timers, adds
-    observers, or injects the AutoNext badge. The real AnimePahe document is
-    loaded separately after verification succeeds and will initialize normally.
+    Anti-bot providers may serve verification documents at the normal
+    AnimePahe URL, so metadata @exclude rules cannot reliably keep the
+    userscript out. Classify the document before main() touches storage,
+    patches history, starts timers, adds observers, or injects UI.
+
+    This is detection and isolation only. The script never solves, clicks,
+    submits, or attempts to bypass a challenge.
   */
-  if (isCloudflareChallengeDocument()) {
-    console.info('[AnimePahe AutoNext] Cloudflare verification detected; suspended for this document.');
+  const antiBotChallenge = detectAntiBotChallengeDocument();
+  if (antiBotChallenge.detected) {
+    console.info(
+      '[AnimePahe AutoNext] Anti-bot verification detected; suspended for this document.' +
+      ' provider=' + antiBotChallenge.provider +
+      ' reason=' + antiBotChallenge.reason
+    );
     return;
   }
 
@@ -41,65 +48,218 @@
     throw error;
   }
 
-  function isCloudflareChallengeDocument() {
+  function detectAntiBotChallengeDocument() {
+    const noChallenge = {
+      detected: false,
+      provider: null,
+      reason: null
+    };
+
     const hostname = String(location.hostname || '');
     if (!/(?:^|\.)animepahe\.(pw|com|org|ch)$/i.test(hostname)) {
-      return false;
+      return noChallenge;
     }
 
     const pathname = String(location.pathname || '');
-    if (/^\/cdn-cgi(?:\/|$)/i.test(pathname)) {
-      return true;
+    const pathSignatures = [
+      { provider: 'Cloudflare', pattern: /^\/cdn-cgi(?:\/|$)/i },
+      { provider: 'Akamai', pattern: /^\/_sec\/cp_challenge(?:\/|$)/i },
+      { provider: 'Imperva', pattern: /^\/_Incapsula_Resource(?:\/|$)/i },
+      { provider: 'DDoS-Guard', pattern: /^\/(?:\.well-known\/)?ddos-guard(?:\/|$)/i }
+    ];
+
+    for (const signature of pathSignatures) {
+      if (signature.pattern.test(pathname)) {
+        return {
+          detected: true,
+          provider: signature.provider,
+          reason: 'challenge-path'
+        };
+      }
     }
 
-    const strongChallengeSelector = [
-      '#challenge-running',
-      '#challenge-stage',
-      '#cf-challenge-running',
-      'form#challenge-form',
-      '#cf-error-details'
-    ].join(', ');
+    const strongShellSignatures = [
+      {
+        provider: 'Cloudflare',
+        selector: '#challenge-running, #challenge-stage, #cf-challenge-running, form#challenge-form, #cf-error-details'
+      },
+      {
+        provider: 'HUMAN/PerimeterX',
+        selector: '#px-captcha, .px-captcha-container'
+      },
+      {
+        provider: 'DataDome',
+        selector: '#datadome-captcha, [data-cy="captcha-component"]'
+      },
+      {
+        provider: 'Imperva',
+        selector: '#incapsula-error-page, .incapsula-error-page'
+      },
+      {
+        provider: 'AWS WAF',
+        selector: '#aws-waf-captcha, .awswaf-captcha-container'
+      },
+      {
+        provider: 'DDoS-Guard',
+        selector: '#ddg-challenge, .ddos-guard-challenge'
+      },
+      {
+        provider: 'Akamai',
+        selector: 'form[action*="/_sec/cp_challenge/"]'
+      }
+    ];
 
     try {
-      if (document.querySelector(strongChallengeSelector)) {
-        return true;
+      for (const signature of strongShellSignatures) {
+        if (document.querySelector(signature.selector)) {
+          return {
+            detected: true,
+            provider: signature.provider,
+            reason: 'challenge-shell'
+          };
+        }
       }
     } catch (_error) {
-      // Fall through to the title/body signature check.
+      // Fall through to title, body-copy, and supporting-asset signals.
     }
 
     const title = String(document.title || '').trim();
     const hasChallengeTitle =
-      /^(just a moment|attention required|security verification|verifying you are human)\b/i.test(title);
+      /^(just a moment|attention required|access denied|security (?:check|verification)|verify(?:ing)? (?:that )?you are human|are you human|robot check|captcha(?: challenge)?|checking your browser|ddos protection)\b/i.test(title);
 
+    let bodyText = '';
     try {
-      const bodyText = String(document.body && document.body.textContent || '');
-      const hasChallengeCopy =
-        /\b(cloudflare|verifying you are human|checking your browser|security verification|ray id)\b/i.test(bodyText);
-      if (hasChallengeTitle && hasChallengeCopy) {
-        return true;
+      // Challenge copy is short and appears near the top. Bound the scan so
+      // a large episode listing cannot turn detection into expensive work.
+      bodyText = String(document.body && document.body.textContent || '').slice(0, 20000);
+    } catch (_error) {
+      if (hasChallengeTitle) {
+        return {
+          detected: true,
+          provider: 'Unknown',
+          reason: 'challenge-title-body-unreadable'
+        };
+      }
+    }
+
+    const providerCopySignatures = [
+      { provider: 'Cloudflare', pattern: /\b(cloudflare|ray id)\b/i },
+      { provider: 'DDoS-Guard', pattern: /\bddos-guard\b/i },
+      { provider: 'HUMAN/PerimeterX', pattern: /\b(perimeterx|human security|px-captcha)\b/i },
+      { provider: 'DataDome', pattern: /\bdatadome\b/i },
+      { provider: 'Imperva', pattern: /\b(imperva|incapsula)\b/i },
+      { provider: 'AWS WAF', pattern: /\b(aws waf|awswaf)\b/i },
+      { provider: 'Akamai', pattern: /\bakamai\b/i },
+      { provider: 'hCaptcha', pattern: /\bhcaptcha\b/i },
+      { provider: 'Google reCAPTCHA', pattern: /\b(?:google )?recaptcha\b/i },
+      { provider: 'Arkose Labs', pattern: /\b(arkose labs|funcaptcha)\b/i }
+    ];
+
+    let copyProvider = null;
+    for (const signature of providerCopySignatures) {
+      if (signature.pattern.test(bodyText)) {
+        copyProvider = signature.provider;
+        break;
+      }
+    }
+
+    const hasGenericChallengeCopy =
+      /\b(verifying you are human|verify (?:that )?you are human|checking your browser|unusual traffic|automated requests|bot verification|security (?:check|verification)|enable javascript and cookies|complete (?:the )?(?:security check|captcha)|captcha challenge|i(?:\u0027|\u2019)?m not a robot|press and hold)\b/i.test(bodyText);
+
+    if (hasChallengeTitle && copyProvider) {
+      return {
+        detected: true,
+        provider: copyProvider,
+        reason: 'challenge-title-and-copy'
+      };
+    }
+
+    const supportingAssetSignatures = [
+      {
+        provider: 'Cloudflare',
+        selector: 'input[name="cf-turnstile-response"], [id^="cf-chl-widget-"], script[src*="/cdn-cgi/challenge-platform/"]'
+      },
+      {
+        provider: 'HUMAN/PerimeterX',
+        selector: 'script[src*="captcha.px-cdn.net"], script[src*="captcha.px-cloud.net"], iframe[src*="captcha.px-cdn.net"], iframe[src*="captcha.px-cloud.net"], script[src*="/px-captcha/"]'
+      },
+      {
+        provider: 'DataDome',
+        selector: 'script[src*="captcha-delivery.com"], iframe[src*="captcha-delivery.com"]'
+      },
+      {
+        provider: 'Imperva',
+        selector: 'script[src*="_Incapsula_Resource"], iframe[src*="_Incapsula_Resource"]'
+      },
+      {
+        provider: 'AWS WAF',
+        selector: 'script[src*="awswaf.com"], script[src*="aws-waf"], script[src$="/challenge.js"], script[src$="/jsapi.js"]'
+      },
+      {
+        provider: 'DDoS-Guard',
+        selector: 'script[src*="check.ddos-guard.net"], script[src*="/ddos-guard/"]'
+      },
+      {
+        provider: 'Akamai',
+        selector: 'script[src*="/_sec/cp_challenge/"]'
+      },
+      {
+        provider: 'hCaptcha',
+        selector: 'script[src*="hcaptcha.com/1/api.js"], iframe[src*="hcaptcha.com/captcha"]'
+      },
+      {
+        provider: 'Google reCAPTCHA',
+        selector: 'script[src*="google.com/recaptcha/"], script[src*="recaptcha.net/recaptcha/"], iframe[src*="google.com/recaptcha/"], iframe[src*="recaptcha.net/recaptcha/"]'
+      },
+      {
+        provider: 'Arkose Labs',
+        selector: 'script[src*="arkoselabs.com"], iframe[src*="arkoselabs.com"], script[src*="funcaptcha.com"], iframe[src*="funcaptcha.com"]'
+      }
+    ];
+
+    let assetProvider = null;
+    try {
+      for (const signature of supportingAssetSignatures) {
+        if (document.querySelector(signature.selector)) {
+          assetProvider = signature.provider;
+          break;
+        }
       }
     } catch (_error) {
       if (hasChallengeTitle) {
-        return true;
+        return {
+          detected: true,
+          provider: copyProvider || 'Unknown',
+          reason: 'challenge-title-assets-unreadable'
+        };
       }
     }
 
-    if (!hasChallengeTitle) {
-      return false;
+    if (hasChallengeTitle && assetProvider) {
+      return {
+        detected: true,
+        provider: copyProvider || assetProvider,
+        reason: 'challenge-title-and-asset'
+      };
     }
 
-    const challengeAssetSelector = [
-      'input[name="cf-turnstile-response"]',
-      '[id^="cf-chl-widget-"]',
-      'script[src*="/cdn-cgi/challenge-platform/"]'
-    ].join(', ');
-
-    try {
-      return Boolean(document.querySelector(challengeAssetSelector));
-    } catch (_error) {
-      return true;
+    if (hasChallengeTitle && hasGenericChallengeCopy) {
+      return {
+        detected: true,
+        provider: 'Unknown',
+        reason: 'challenge-title-and-copy'
+      };
     }
+
+    if (copyProvider && assetProvider && copyProvider === assetProvider && hasGenericChallengeCopy) {
+      return {
+        detected: true,
+        provider: copyProvider,
+        reason: 'provider-copy-and-asset'
+      };
+    }
+
+    return noChallenge;
   }
 
   function main() {

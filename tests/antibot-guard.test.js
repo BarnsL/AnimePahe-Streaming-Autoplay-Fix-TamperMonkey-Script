@@ -56,9 +56,9 @@ function extractFunction(functionName) {
   throw new Error(`Could not extract ${functionName}`);
 }
 
-const guardSource = extractFunction('isCloudflareChallengeDocument');
+const guardSource = extractFunction('detectAntiBotChallengeDocument');
 
-function detectsChallenge({
+function classifyChallenge({
   hostname = 'animepahe.pw',
   pathname = '/',
   title = '',
@@ -79,49 +79,150 @@ function detectsChallenge({
   return vm.runInNewContext(`(${guardSource})()`, sandbox);
 }
 
-assert.equal(detectsChallenge({
+function assertDetected(input, expectedProvider, expectedReason) {
+  const result = classifyChallenge(input);
+  assert.equal(result.detected, true, `expected challenge: ${JSON.stringify(input)}`);
+  assert.equal(result.provider, expectedProvider);
+  if (expectedReason) {
+    assert.equal(result.reason, expectedReason);
+  }
+}
+
+function assertAllowed(input) {
+  const result = classifyChallenge(input);
+  assert.equal(result.detected, false, `expected normal document: ${JSON.stringify(input)}`);
+  assert.equal(result.provider, null);
+  assert.equal(result.reason, null);
+}
+
+assertDetected({
   title: 'Just a moment...',
-  bodyText: 'Verifying you are human. Performance and Security by Cloudflare.'
-}), true);
+  bodyText: 'Verifying you are human. Performance and Security by Cloudflare. Ray ID: abc123'
+}, 'Cloudflare', 'challenge-title-and-copy');
 
-assert.equal(detectsChallenge({
+assertDetected({
   pathname: '/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1'
-}), true);
+}, 'Cloudflare', 'challenge-path');
 
-assert.equal(detectsChallenge({
-  matchedSelectorContains: '#challenge-running'
-}), true);
+assertDetected({
+  pathname: '/_sec/cp_challenge/verify'
+}, 'Akamai', 'challenge-path');
 
-assert.equal(detectsChallenge({
+assertDetected({
+  pathname: '/_Incapsula_Resource/'
+}, 'Imperva', 'challenge-path');
+
+assertDetected({
+  pathname: '/.well-known/ddos-guard/check'
+}, 'DDoS-Guard', 'challenge-path');
+
+const strongShellCases = [
+  ['#challenge-running', 'Cloudflare'],
+  ['#px-captcha', 'HUMAN/PerimeterX'],
+  ['#datadome-captcha', 'DataDome'],
+  ['#incapsula-error-page', 'Imperva'],
+  ['#aws-waf-captcha', 'AWS WAF'],
+  ['#ddg-challenge', 'DDoS-Guard'],
+  ['/_sec/cp_challenge/', 'Akamai']
+];
+
+for (const [selector, provider] of strongShellCases) {
+  assertDetected({ matchedSelectorContains: selector }, provider, 'challenge-shell');
+}
+
+assertDetected({
+  title: 'Security verification',
+  bodyText: 'Complete the security check to continue.'
+}, 'Unknown', 'challenge-title-and-copy');
+
+assertDetected({
   title: 'Just a moment...',
   matchedSelectorContains: 'challenge-platform'
-}), true);
+}, 'Cloudflare', 'challenge-title-and-asset');
 
-assert.equal(detectsChallenge({
+assertDetected({
+  title: 'CAPTCHA challenge',
+  bodyText: 'Complete the CAPTCHA to continue.',
+  matchedSelectorContains: 'hcaptcha.com'
+}, 'hCaptcha', 'challenge-title-and-asset');
+
+assertDetected({
+  title: 'Robot check',
+  bodyText: "I'm not a robot.",
+  matchedSelectorContains: 'google.com/recaptcha/'
+}, 'Google reCAPTCHA', 'challenge-title-and-asset');
+
+assertDetected({
+  title: 'Security verification',
+  bodyText: 'Press and hold to verify that you are human.',
+  matchedSelectorContains: 'captcha.px-cdn.net'
+}, 'HUMAN/PerimeterX', 'challenge-title-and-asset');
+
+assertDetected({
+  title: 'AnimePahe',
+  bodyText: 'DataDome bot verification is in progress.',
+  matchedSelectorContains: 'captcha-delivery.com'
+}, 'DataDome', 'provider-copy-and-asset');
+
+assertDetected({
+  title: 'AnimePahe',
+  bodyText: 'Arkose Labs bot verification. Complete the CAPTCHA.',
+  matchedSelectorContains: 'arkoselabs.com'
+}, 'Arkose Labs', 'provider-copy-and-asset');
+
+assertAllowed({
   title: 'AnimePahe',
   bodyText: 'Latest anime episodes'
-}), false);
+});
 
-assert.equal(detectsChallenge({
+assertAllowed({
   title: 'AnimePahe Login',
   bodyText: 'Sign in to continue',
   matchedSelectorContains: 'cf-turnstile-response'
-}), false);
+});
 
-assert.equal(detectsChallenge({
+assertAllowed({
+  title: 'AnimePahe Login',
+  bodyText: 'Sign in to continue',
+  matchedSelectorContains: 'hcaptcha.com'
+});
+
+assertAllowed({
+  title: 'Please wait for the episode list',
+  bodyText: 'Loading episodes'
+});
+
+assertAllowed({
+  title: 'AnimePahe',
+  bodyText: 'Cloudflare powers part of our infrastructure.'
+});
+
+assertAllowed({
+  title: 'AnimePahe',
+  matchedSelectorContains: 'captcha-delivery.com'
+});
+
+assertAllowed({
   hostname: 'kwik.cx',
   title: 'Just a moment...',
   bodyText: 'Cloudflare'
-}), false);
+});
 
-const guardCall = 'if (isCloudflareChallengeDocument())';
+assertAllowed({
+  hostname: 'example.com',
+  pathname: '/cdn-cgi/challenge-platform/',
+  title: 'Just a moment...',
+  bodyText: 'Cloudflare'
+});
+
+const guardCall = 'const antiBotChallenge = detectAntiBotChallengeDocument();';
 assert.ok(
   source.indexOf(guardCall) < source.indexOf('main();'),
-  'Cloudflare guard must run before main()'
+  'anti-bot guard must run before main()'
 );
 
 const forbiddenSideEffect = (name) => function forbiddenCall() {
-  throw new Error(`Challenge document triggered forbidden side effect: ${name}`);
+  throw new Error(`Anti-bot document triggered forbidden side effect: ${name}`);
 };
 
 vm.runInNewContext(source, {
@@ -151,4 +252,4 @@ vm.runInNewContext(source, {
   }
 });
 
-console.log('Cloudflare guard regression tests passed.');
+console.log('Anti-bot guard regression tests passed.');

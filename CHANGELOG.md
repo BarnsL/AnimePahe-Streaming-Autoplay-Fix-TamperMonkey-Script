@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.10] - 2026-07-28
+
+### Added
+
+- Provider-aware anti-bot detection for Cloudflare, DDoS-Guard, HUMAN/PerimeterX, DataDome, Imperva, AWS WAF, Akamai, hCaptcha, Google reCAPTCHA, Arkose Labs, and unknown full-page verification interstitials.
+- Detection reasons and provider labels in the suspension log.
+- Regression cases for provider paths, challenge shells, title/copy pairs, provider assets, and false-positive controls.
+
+### Changed
+
+- Renamed the Cloudflare-only classifier and compatibility guide to reflect general anti-bot isolation.
+- Require multiple contextual signals for generic CAPTCHA assets so embedded Turnstile/CAPTCHA widgets do not suppress AutoNext by themselves.
+- Expanded README and compatibility documentation with the provider matrix and non-bypass contract.
+
 ## [2.0.9] - 2026-07-28
 
 ### Fixed

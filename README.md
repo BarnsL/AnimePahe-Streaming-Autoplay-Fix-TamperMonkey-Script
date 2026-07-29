@@ -4,7 +4,7 @@ A production-ready Tampermonkey userscript that restores reliable AutoNext and A
 
 [![Userscript checks](https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/actions/workflows/userscript-checks.yml/badge.svg)](https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/actions/workflows/userscript-checks.yml)
 
-Current release: **2.0.9**. See [CHANGELOG.md](CHANGELOG.md) for release history.
+Current release: **2.0.10**. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Repository Naming Scheme
 
@@ -28,7 +28,7 @@ Use this exact content in your GitHub repository About panel.
 ## Quick Summary
 
 - Script file: animepahe-autonext-v2.user.js
-- Current script version: 2.0.9
+- Current script version: 2.0.10
 - Runs on:
   - https://animepahe.pw/*
   - https://animepahe.com/*
@@ -45,17 +45,19 @@ Use this exact content in your GitHub repository About panel.
    - Background playback guard for Discord streaming (auto-resume on focus/visibility pause).
   - Auto-unmute and volume restoration after autoplay starts.
   - Persistent ON/OFF toggle state.
-  - Cloudflare verification documents are detected before initialization and left completely untouched.
+  - Cloudflare and other anti-bot verification documents are detected before initialization and left completely untouched.
 
-## Cloudflare Verification Compatibility (v2.0.9)
+## Anti-Bot Verification Compatibility (v2.0.10)
 
-Cloudflare can serve its verification UI at the normal AnimePahe root URL. Because the URL still matches the userscript metadata, an `@exclude` rule alone cannot prevent execution.
+Anti-bot services can serve verification UI at the normal AnimePahe URL. Because the URL still matches the userscript metadata, an `@exclude` rule alone cannot prevent execution.
 
-Version 2.0.9 adds an early document-ownership guard. When a Cloudflare challenge is detected, the script exits before it reads or writes userscript state, injects the AutoNext badge, patches browser history, registers page listeners, or starts timers and observers. After Cloudflare loads the real AnimePahe document, Tampermonkey starts the script normally on that new page.
+Version 2.0.10 adds provider-aware detection for Cloudflare, DDoS-Guard, HUMAN/PerimeterX, DataDome, Imperva, AWS WAF, Akamai, hCaptcha, Google reCAPTCHA, Arkose Labs, and unknown full-page verification interstitials. Detection combines path, strong challenge-shell, title, body-copy, and supporting-asset signals.
 
-The guard does not solve, automate, or bypass Cloudflare. It keeps AutoNext completely inactive while Cloudflare performs its own verification.
+When a challenge is detected, the script exits before it reads or writes userscript state, injects UI, patches browser history, registers listeners, or starts timers and observers. A generic embedded CAPTCHA or Turnstile widget is not enough by itself to suppress AutoNext.
 
-See [CLOUDFLARE_COMPATIBILITY.md](CLOUDFLARE_COMPATIBILITY.md) for the complete root-cause analysis, evidence, detection contract, rollout, rollback, and residual-risk assessment.
+The guard does not solve, automate, click, submit, or bypass challenges. It keeps AutoNext inactive while the verification provider performs its own work.
+
+See [ANTIBOT_COMPATIBILITY.md](ANTIBOT_COMPATIBILITY.md) for the complete root-cause analysis, provider matrix, detection contract, rollout, rollback, and residual-risk assessment.
 
 ## Development and Release Checks
 
@@ -65,7 +67,7 @@ The repository has no runtime dependencies. Node.js is used only for syntax and 
 npm test
 ```
 
-The command validates userscript syntax and runs the Cloudflare zero-side-effect regression suite. GitHub Actions runs the same check for pushes and pull requests.
+The command validates userscript syntax and runs the anti-bot zero-side-effect regression suite. GitHub Actions runs the same check for pushes and pull requests.
 
 ## Long-Series Redirect Fix (v2.0.6)
 
@@ -220,7 +222,7 @@ Practical note:
 
 ### Post-install checks
 
-1. If Cloudflare verification appears, confirm the AutoNext badge is absent until verification finishes.
+1. If an anti-bot verification page appears, confirm the AutoNext badge is absent until verification finishes.
 2. Visit an AnimePahe episode page.
 3. Confirm the top-right badge shows AutoNext ON.
 4. Play the episode and wait for the end.
@@ -304,9 +306,9 @@ Use this section when another assistant, automation runner, or CI doc-bot needs 
 2. Confirm script enabled in Tampermonkey.
 3. Disable duplicate test scripts.
 
-### Cloudflare verification loops or shows the AutoNext badge
+### Anti-bot verification loops or shows the AutoNext badge
 
-1. Confirm the installed script reports version 2.0.9 or newer in Tampermonkey.
+1. Confirm the installed script reports version 2.0.10 or newer in Tampermonkey.
 2. Refresh the AnimePahe tab once after saving or updating the userscript.
 3. During verification, confirm the `AutoNext ON` badge is absent.
 4. After verification succeeds, confirm the badge appears on the real AnimePahe page.
