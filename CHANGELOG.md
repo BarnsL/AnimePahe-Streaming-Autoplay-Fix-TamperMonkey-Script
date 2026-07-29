@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.11] - 2026-07-29
+
+### Fixed
+
+- Added a positive AnimePahe application-shell allowlist before parent-controller initialization. Unknown or changed interstitial markup now fails closed even when no provider signature matches.
+- Extended full-page anti-bot detection to matched kwik player hosts instead of treating every kwik document as a normal player page.
+- Added zero-side-effect regression coverage for unknown same-origin interstitials with no recognized provider branding.
+
+### Documented
+
+- Recorded the follow-up reproduction where verification remained stalled with the AutoNext badge absent and in a clean browser session without the userscript.
+- Split userscript isolation acceptance from Cloudflare challenge completion, which can still fail because of browser configuration, extensions, cookies, JavaScript, network conditions, or provider-side detection.
+- Added a Brave-specific recovery sequence based on official Brave and Cloudflare troubleshooting guidance.
+
 ## [2.0.10] - 2026-07-28
 
 ### Added

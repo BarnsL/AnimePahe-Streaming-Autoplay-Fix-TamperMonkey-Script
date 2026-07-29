@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.10
-// @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
+// @version      2.0.11
+// @description  Restores AnimePahe AutoNext/autoplay while isolating anti-bot verification documents.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
 // @match        https://animepahe.com/*
@@ -41,6 +41,23 @@
     return;
   }
 
+  /*
+    A provider can change its verification markup without notice. On an
+    AnimePahe hostname, absence of a known challenge signature is therefore
+    not sufficient proof that the page belongs to AnimePahe. Require a
+    positive application marker before starting the parent-page controller.
+
+    This fail-closed gate performs DOM reads only. If ownership is not proven,
+    it returns before storage, history, timers, listeners, observers, or UI.
+  */
+  const animePaheApplication = detectAnimePaheApplicationDocument();
+  if (animePaheApplication.required && !animePaheApplication.detected) {
+    console.info(
+      '[AnimePahe AutoNext] AnimePahe application shell not detected; suspended for this document.'
+    );
+    return;
+  }
+
   try {
     main();
   } catch (error) {
@@ -56,7 +73,9 @@
     };
 
     const hostname = String(location.hostname || '');
-    if (!/(?:^|\.)animepahe\.(pw|com|org|ch)$/i.test(hostname)) {
+    const isAnimePaheHost = /(?:^|\.)animepahe\.(pw|com|org|ch)$/i.test(hostname);
+    const isKwikHost = /(?:^|\.)kwik\.[a-z0-9.-]+$/i.test(hostname);
+    if (!isAnimePaheHost && !isKwikHost) {
       return noChallenge;
     }
 
@@ -260,6 +279,59 @@
     }
 
     return noChallenge;
+  }
+
+  function detectAnimePaheApplicationDocument() {
+    const hostname = String(location.hostname || '');
+    if (!/(?:^|\.)animepahe\.(pw|com|org|ch)$/i.test(hostname)) {
+      return {
+        required: false,
+        detected: true,
+        reason: 'not-animepahe-host'
+      };
+    }
+
+    /*
+      These markers are owned by normal AnimePahe navigation, title, episode,
+      or player UI. Challenge pages can reuse the hostname and pathname, but
+      should not contain AnimePahe application routes or player controls.
+    */
+    const applicationSignatures = [
+      { reason: 'episode-list', selector: '#scrollArea' },
+      { reason: 'next-episode-control', selector: 'a[title="Play Next Episode"]' },
+      { reason: 'homepage-search', selector: 'form.nav-search, .nav-search .input-search' },
+      { reason: 'player-load-gate', selector: '.click-to-load, [title="Click to load"], [aria-label="Click to load"]' },
+      { reason: 'kwik-player-frame', selector: 'iframe[src*="//kwik."]' },
+      { reason: 'player-server-control', selector: 'select[name="mirror"], select[name="server"], select[data-mirror]' },
+      { reason: 'play-route', selector: 'a[href*="/play/"], [data-href*="/play/"], [data-url*="/play/"]' },
+      { reason: 'anime-route', selector: 'a[href*="/anime/"], [data-href*="/anime/"], [data-url*="/anime/"]' },
+      { reason: 'series-route', selector: 'a[href*="/series/"], [data-href*="/series/"], [data-url*="/series/"]' },
+      { reason: 'episode-route', selector: 'a[href*="-episode-"], [data-href*="-episode-"], [data-url*="-episode-"]' }
+    ];
+
+    try {
+      for (const signature of applicationSignatures) {
+        if (document.querySelector(signature.selector)) {
+          return {
+            required: true,
+            detected: true,
+            reason: signature.reason
+          };
+        }
+      }
+    } catch (_error) {
+      return {
+        required: true,
+        detected: false,
+        reason: 'application-shell-unreadable'
+      };
+    }
+
+    return {
+      required: true,
+      detected: false,
+      reason: 'application-shell-absent'
+    };
   }
 
   function main() {

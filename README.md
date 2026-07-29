@@ -4,7 +4,7 @@ A production-ready Tampermonkey userscript that restores reliable AutoNext and A
 
 [![Userscript checks](https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/actions/workflows/userscript-checks.yml/badge.svg)](https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/actions/workflows/userscript-checks.yml)
 
-Current release: **2.0.10**. See [CHANGELOG.md](CHANGELOG.md) for release history.
+Current release: **2.0.11**. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Repository Naming Scheme
 
@@ -28,7 +28,7 @@ Use this exact content in your GitHub repository About panel.
 ## Quick Summary
 
 - Script file: animepahe-autonext-v2.user.js
-- Current script version: 2.0.10
+- Current script version: 2.0.11
 - Runs on:
   - https://animepahe.pw/*
   - https://animepahe.com/*
@@ -46,14 +46,15 @@ Use this exact content in your GitHub repository About panel.
   - Auto-unmute and volume restoration after autoplay starts.
   - Persistent ON/OFF toggle state.
   - Cloudflare and other anti-bot verification documents are detected before initialization and left completely untouched.
+  - AnimePahe parent logic starts only after a normal application shell is positively identified.
 
-## Anti-Bot Verification Compatibility (v2.0.10)
+## Anti-Bot Verification Compatibility (v2.0.11)
 
 Anti-bot services can serve verification UI at the normal AnimePahe URL. Because the URL still matches the userscript metadata, an `@exclude` rule alone cannot prevent execution.
 
-Version 2.0.10 adds provider-aware detection for Cloudflare, DDoS-Guard, HUMAN/PerimeterX, DataDome, Imperva, AWS WAF, Akamai, hCaptcha, Google reCAPTCHA, Arkose Labs, and unknown full-page verification interstitials. Detection combines path, strong challenge-shell, title, body-copy, and supporting-asset signals.
+Version 2.0.11 includes provider-aware detection for Cloudflare, DDoS-Guard, HUMAN/PerimeterX, DataDome, Imperva, AWS WAF, Akamai, hCaptcha, Google reCAPTCHA, Arkose Labs, and unknown full-page verification interstitials. Detection combines path, strong challenge-shell, title, body-copy, and supporting-asset signals on AnimePahe and kwik hosts.
 
-When a challenge is detected, the script exits before it reads or writes userscript state, injects UI, patches browser history, registers listeners, or starts timers and observers. A generic embedded CAPTCHA or Turnstile widget is not enough by itself to suppress AutoNext.
+When a challenge is detected, the script exits before it reads or writes userscript state, injects UI, patches browser history, registers listeners, or starts timers and observers. AnimePahe documents must also contain a positive application marker such as an episode list, a player/server control, or an AnimePahe navigation route. An unknown same-origin document therefore fails closed even if its anti-bot provider changed every known signature. A generic embedded CAPTCHA or Turnstile widget is not enough by itself to suppress AutoNext on a positively identified application page.
 
 The guard does not solve, automate, click, submit, or bypass challenges. It keeps AutoNext inactive while the verification provider performs its own work.
 
@@ -67,7 +68,7 @@ The repository has no runtime dependencies. Node.js is used only for syntax and 
 npm test
 ```
 
-The command validates userscript syntax and runs the anti-bot zero-side-effect regression suite. GitHub Actions runs the same check for pushes and pull requests.
+The command validates userscript syntax and runs the anti-bot and application-ownership zero-side-effect regression suite. GitHub Actions runs the same check for pushes and pull requests.
 
 ## Long-Series Redirect Fix (v2.0.6)
 
@@ -305,13 +306,22 @@ Use this section when another assistant, automation runner, or CI doc-bot needs 
 1. Confirm URL matches supported domains.
 2. Confirm script enabled in Tampermonkey.
 3. Disable duplicate test scripts.
+4. If an anti-bot or unknown interstitial is visible, a missing badge is expected and confirms safe suspension.
 
 ### Anti-bot verification loops or shows the AutoNext badge
 
-1. Confirm the installed script reports version 2.0.10 or newer in Tampermonkey.
+1. Confirm the installed script reports version 2.0.11 or newer in Tampermonkey.
 2. Refresh the AnimePahe tab once after saving or updating the userscript.
-3. During verification, confirm the `AutoNext ON` badge is absent.
-4. After verification succeeds, confirm the badge appears on the real AnimePahe page.
+3. During verification, confirm the `AutoNext ON` badge is absent. If it is absent, AutoNext is safely suspended and is not the remaining cause of the loop.
+4. In Brave, click the Shields lion for `animepahe.pw` and temporarily turn Shields down for that site, then reload. Brave documents that strict JavaScript/cookie blocking can break sites and supports per-site Shields changes.
+5. Confirm JavaScript and cookies are allowed for the site, temporarily disable other content-filtering/privacy extensions for this site, and retry without a VPN or proxy if one is active.
+6. If the loop persists, clear only `animepahe.pw` site data, reopen the site, and retain the displayed Cloudflare Ray ID for the site operator. Cloudflare lists network instability, browser configuration/extensions, unsupported browsers, disabled JavaScript, and detection errors as common challenge-loop causes.
+7. After verification succeeds, restore the preferred Shields setting one control at a time and confirm the badge appears on the real AnimePahe page.
+
+Official troubleshooting references:
+
+- [Brave site-specific Shields settings](https://support.brave.com/hc/en-us/articles/360023646212-How-do-I-configure-global-and-site-specific-Shields-settings)
+- [Cloudflare challenge solve issues](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)
 
 ## Tested Flow Example
 

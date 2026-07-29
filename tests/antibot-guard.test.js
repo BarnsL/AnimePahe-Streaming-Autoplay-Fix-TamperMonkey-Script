@@ -57,6 +57,7 @@ function extractFunction(functionName) {
 }
 
 const guardSource = extractFunction('detectAntiBotChallengeDocument');
+const applicationGateSource = extractFunction('detectAnimePaheApplicationDocument');
 
 function classifyChallenge({
   hostname = 'animepahe.pw',
@@ -93,6 +94,36 @@ function assertAllowed(input) {
   assert.equal(result.detected, false, `expected normal document: ${JSON.stringify(input)}`);
   assert.equal(result.provider, null);
   assert.equal(result.reason, null);
+}
+
+function classifyAnimePaheApplication({
+  hostname = 'animepahe.pw',
+  matchedSelectorContains = ''
+} = {}) {
+  const sandbox = {
+    location: { hostname },
+    document: {
+      querySelector(selector) {
+        return matchedSelectorContains && selector.includes(matchedSelectorContains) ? {} : null;
+      }
+    }
+  };
+
+  return vm.runInNewContext(`(${applicationGateSource})()`, sandbox);
+}
+
+function assertApplicationDetected(matchedSelectorContains, expectedReason) {
+  const result = classifyAnimePaheApplication({ matchedSelectorContains });
+  assert.equal(result.required, true);
+  assert.equal(result.detected, true);
+  assert.equal(result.reason, expectedReason);
+}
+
+function assertApplicationResult(input, expected) {
+  const result = classifyAnimePaheApplication(input);
+  assert.equal(result.required, expected.required);
+  assert.equal(result.detected, expected.detected);
+  assert.equal(result.reason, expected.reason);
 }
 
 assertDetected({
@@ -202,11 +233,11 @@ assertAllowed({
   matchedSelectorContains: 'captcha-delivery.com'
 });
 
-assertAllowed({
+assertDetected({
   hostname: 'kwik.cx',
   title: 'Just a moment...',
   bodyText: 'Cloudflare'
-});
+}, 'Cloudflare', 'challenge-title-and-copy');
 
 assertAllowed({
   hostname: 'example.com',
@@ -215,10 +246,46 @@ assertAllowed({
   bodyText: 'Cloudflare'
 });
 
+assertApplicationDetected('#scrollArea', 'episode-list');
+assertApplicationDetected('Play Next Episode', 'next-episode-control');
+assertApplicationDetected('.nav-search', 'homepage-search');
+assertApplicationDetected('.click-to-load', 'player-load-gate');
+assertApplicationDetected('//kwik.', 'kwik-player-frame');
+assertApplicationDetected('name="mirror"', 'player-server-control');
+assertApplicationDetected('/play/', 'play-route');
+assertApplicationDetected('/anime/', 'anime-route');
+assertApplicationDetected('/series/', 'series-route');
+assertApplicationDetected('-episode-', 'episode-route');
+
+assertApplicationResult(
+  {},
+  {
+    required: true,
+    detected: false,
+    reason: 'application-shell-absent'
+  }
+);
+
+assertApplicationResult(
+  {
+    hostname: 'kwik.cx'
+  },
+  {
+    required: false,
+    detected: true,
+    reason: 'not-animepahe-host'
+  }
+);
+
 const guardCall = 'const antiBotChallenge = detectAntiBotChallengeDocument();';
+const applicationGateCall = 'const animePaheApplication = detectAnimePaheApplicationDocument();';
 assert.ok(
   source.indexOf(guardCall) < source.indexOf('main();'),
   'anti-bot guard must run before main()'
+);
+assert.ok(
+  source.indexOf(applicationGateCall) < source.indexOf('main();'),
+  'positive AnimePahe application gate must run before main()'
 );
 
 const forbiddenSideEffect = (name) => function forbiddenCall() {
@@ -236,6 +303,33 @@ vm.runInNewContext(source, {
     },
     querySelector() {
       return { id: 'challenge-running' };
+    },
+    getElementById: forbiddenSideEffect('document.getElementById'),
+    createElement: forbiddenSideEffect('document.createElement')
+  },
+  GM_getValue: forbiddenSideEffect('GM_getValue'),
+  GM_setValue: forbiddenSideEffect('GM_setValue'),
+  addEventListener: forbiddenSideEffect('addEventListener'),
+  setInterval: forbiddenSideEffect('setInterval'),
+  setTimeout: forbiddenSideEffect('setTimeout'),
+  MutationObserver: forbiddenSideEffect('MutationObserver'),
+  history: {
+    pushState: forbiddenSideEffect('history.pushState'),
+    replaceState: forbiddenSideEffect('history.replaceState')
+  }
+});
+
+vm.runInNewContext(source, {
+  console: { info() {}, log() {}, warn() {}, error() {} },
+  location: { hostname: 'animepahe.pw', pathname: '/', href: 'https://animepahe.pw/' },
+  document: {
+    title: 'Please wait',
+    body: {
+      textContent: 'Your request is being processed.',
+      appendChild: forbiddenSideEffect('document.body.appendChild')
+    },
+    querySelector() {
+      return null;
     },
     getElementById: forbiddenSideEffect('document.getElementById'),
     createElement: forbiddenSideEffect('document.createElement')
