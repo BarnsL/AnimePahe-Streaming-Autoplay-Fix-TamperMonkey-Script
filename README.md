@@ -2,6 +2,10 @@
 
 A production-ready Tampermonkey userscript that restores reliable AutoNext and AutoPlay behavior on AnimePahe + kwik player pages, including automatic audio restoration after the next episode starts.
 
+[![Userscript checks](https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/actions/workflows/userscript-checks.yml/badge.svg)](https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script/actions/workflows/userscript-checks.yml)
+
+Current release: **2.0.9**. See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Repository Naming Scheme
 
 This project follows the same naming pattern style as the reference 9Anime project:
@@ -24,7 +28,7 @@ Use this exact content in your GitHub repository About panel.
 ## Quick Summary
 
 - Script file: animepahe-autonext-v2.user.js
-- Current script version: 2.0.8
+- Current script version: 2.0.9
 - Runs on:
   - https://animepahe.pw/*
   - https://animepahe.com/*
@@ -41,6 +45,27 @@ Use this exact content in your GitHub repository About panel.
    - Background playback guard for Discord streaming (auto-resume on focus/visibility pause).
   - Auto-unmute and volume restoration after autoplay starts.
   - Persistent ON/OFF toggle state.
+  - Cloudflare verification documents are detected before initialization and left completely untouched.
+
+## Cloudflare Verification Compatibility (v2.0.9)
+
+Cloudflare can serve its verification UI at the normal AnimePahe root URL. Because the URL still matches the userscript metadata, an `@exclude` rule alone cannot prevent execution.
+
+Version 2.0.9 adds an early document-ownership guard. When a Cloudflare challenge is detected, the script exits before it reads or writes userscript state, injects the AutoNext badge, patches browser history, registers page listeners, or starts timers and observers. After Cloudflare loads the real AnimePahe document, Tampermonkey starts the script normally on that new page.
+
+The guard does not solve, automate, or bypass Cloudflare. It keeps AutoNext completely inactive while Cloudflare performs its own verification.
+
+See [CLOUDFLARE_COMPATIBILITY.md](CLOUDFLARE_COMPATIBILITY.md) for the complete root-cause analysis, evidence, detection contract, rollout, rollback, and residual-risk assessment.
+
+## Development and Release Checks
+
+The repository has no runtime dependencies. Node.js is used only for syntax and regression checks:
+
+```powershell
+npm test
+```
+
+The command validates userscript syntax and runs the Cloudflare zero-side-effect regression suite. GitHub Actions runs the same check for pushes and pull requests.
 
 ## Long-Series Redirect Fix (v2.0.6)
 
@@ -195,12 +220,13 @@ Practical note:
 
 ### Post-install checks
 
-1. Visit an AnimePahe episode page.
-2. Confirm top-right badge shows AutoNext ON.
-3. Play episode and wait for end.
-4. Confirm countdown toast appears.
-5. Confirm navigation to next episode occurs.
-6. Confirm next episode starts and audio is restored.
+1. If Cloudflare verification appears, confirm the AutoNext badge is absent until verification finishes.
+2. Visit an AnimePahe episode page.
+3. Confirm the top-right badge shows AutoNext ON.
+4. Play the episode and wait for the end.
+5. Confirm the countdown toast appears.
+6. Confirm navigation to the next episode occurs.
+7. Confirm the next episode starts and audio is restored.
 
 ## LLM / Automation Installation Instructions
 
@@ -277,6 +303,13 @@ Use this section when another assistant, automation runner, or CI doc-bot needs 
 1. Confirm URL matches supported domains.
 2. Confirm script enabled in Tampermonkey.
 3. Disable duplicate test scripts.
+
+### Cloudflare verification loops or shows the AutoNext badge
+
+1. Confirm the installed script reports version 2.0.9 or newer in Tampermonkey.
+2. Refresh the AnimePahe tab once after saving or updating the userscript.
+3. During verification, confirm the `AutoNext ON` badge is absent.
+4. After verification succeeds, confirm the badge appears on the real AnimePahe page.
 
 ## Tested Flow Example
 

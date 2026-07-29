@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe - Auto-Next & Autoplay Fix v2
 // @namespace    https://github.com/mikutellyourworld/AnimePahe-Streaming-Autoplay-Fix-TamperMonkey-Script
-// @version      2.0.8
+// @version      2.0.9
 // @description  Restores reliable episode auto-next, one-time autoplay handoff, and post-autoplay audio restore on AnimePahe.
 // @author       mikutellyourworld
 // @match        https://animepahe.pw/*
@@ -22,11 +22,84 @@
 (function () {
   'use strict';
 
+  /*
+    Cloudflare may serve its verification document at the normal AnimePahe
+    URL, so metadata @exclude rules cannot reliably keep the userscript out.
+    Exit before main() touches storage, patches history, starts timers, adds
+    observers, or injects the AutoNext badge. The real AnimePahe document is
+    loaded separately after verification succeeds and will initialize normally.
+  */
+  if (isCloudflareChallengeDocument()) {
+    console.info('[AnimePahe AutoNext] Cloudflare verification detected; suspended for this document.');
+    return;
+  }
+
   try {
     main();
   } catch (error) {
     reportFatalError(error);
     throw error;
+  }
+
+  function isCloudflareChallengeDocument() {
+    const hostname = String(location.hostname || '');
+    if (!/(?:^|\.)animepahe\.(pw|com|org|ch)$/i.test(hostname)) {
+      return false;
+    }
+
+    const pathname = String(location.pathname || '');
+    if (/^\/cdn-cgi(?:\/|$)/i.test(pathname)) {
+      return true;
+    }
+
+    const strongChallengeSelector = [
+      '#challenge-running',
+      '#challenge-stage',
+      '#cf-challenge-running',
+      'form#challenge-form',
+      '#cf-error-details'
+    ].join(', ');
+
+    try {
+      if (document.querySelector(strongChallengeSelector)) {
+        return true;
+      }
+    } catch (_error) {
+      // Fall through to the title/body signature check.
+    }
+
+    const title = String(document.title || '').trim();
+    const hasChallengeTitle =
+      /^(just a moment|attention required|security verification|verifying you are human)\b/i.test(title);
+
+    try {
+      const bodyText = String(document.body && document.body.textContent || '');
+      const hasChallengeCopy =
+        /\b(cloudflare|verifying you are human|checking your browser|security verification|ray id)\b/i.test(bodyText);
+      if (hasChallengeTitle && hasChallengeCopy) {
+        return true;
+      }
+    } catch (_error) {
+      if (hasChallengeTitle) {
+        return true;
+      }
+    }
+
+    if (!hasChallengeTitle) {
+      return false;
+    }
+
+    const challengeAssetSelector = [
+      'input[name="cf-turnstile-response"]',
+      '[id^="cf-chl-widget-"]',
+      'script[src*="/cdn-cgi/challenge-platform/"]'
+    ].join(', ');
+
+    try {
+      return Boolean(document.querySelector(challengeAssetSelector));
+    } catch (_error) {
+      return true;
+    }
   }
 
   function main() {
